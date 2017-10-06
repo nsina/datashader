@@ -1,14 +1,12 @@
 name: ds
 channels:
- - bokeh/label/dev
+ - bokeh
  - conda-forge
- - ioam/label/dev
  - ioam
- - scitools/label/dev
 
 dependencies:
  - attrs
- - bokeh>=0.12.6dev3
+ - bokeh
  - cartopy
  - colorcet
  - dask
@@ -16,7 +14,7 @@ dependencies:
  - dill
  - distributed
  - geoviews
- - holoviews
+ - ioam::holoviews>=1.8.3
  - iris
  - jupyter
  - krb5
@@ -38,10 +36,9 @@ dependencies:
  - shapely
  - statsmodels
  - tblib
- - xarray>=0.9.6 # For xarray.open_rasterio()
+ - gbrener::xarray>=0.9.6 # For xarray.open_rasterio()
  - yaml
  - fastparquet
-#- fastcache # Only required for Python2, for the dashboard/
  - snappy
  - python-snappy
  - jupyter_dashboards

@@ -6,7 +6,7 @@ from __future__ import absolute_import, division, print_function
 import numba as nb
 import numpy as np
 import param
-import scipy as sp
+import scipy.sparse
 
 
 class LayoutAlgorithm(param.ParameterizedFunction):
@@ -109,11 +109,18 @@ def _convert_graph_to_sparse_matrix(nodes, edges, dtype=None, format='csr'):
         edges = edges.copy()
         edges['weight'] = np.ones(len(edges))
 
+    edge_values = edges[['source', 'target', 'weight']].values
+
     rows, cols, data = zip(*((index[src], index[dst], weight)
-                             for src, dst, weight in [tuple(edge) for edge in edges.values]
+                             for src, dst, weight in [tuple(edge) for edge in edge_values]
                              if src in index and dst in index))
 
-    M = sp.sparse.coo_matrix((data, (rows, cols)), shape=(nlen, nlen), dtype=dtype)
+    # symmetrize matrix
+    d = data + data
+    r = rows + cols
+    c = cols + rows
+
+    M = scipy.sparse.coo_matrix((d, (r, c)), shape=(nlen, nlen), dtype=dtype)
     return M.asformat(format)
 
 

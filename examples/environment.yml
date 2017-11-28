@@ -6,20 +6,32 @@ channels:
 
 dependencies:
  - attrs
+ - beautifulsoup4
  - bokeh
  - cartopy
  - colorcet
- - dask
+ - conda-forge::graphviz
+ - conda-forge::pytest
+ - conda-forge::pytest-benchmark
+ - conda-forge::python-graphviz
+ - dask>=0.15.4
  - datashader
  - dill
  - distributed
+ - fastparquet
+ - flake8
+ - gbrener::xarray>=0.9.6 # For xarray.open_rasterio()
  - geoviews
  - ioam::holoviews>=1.8.3
+ - ipython
  - iris
  - jupyter
+ - jupyter_dashboards
  - krb5
  - matplotlib
- - networkx
+ - nbconvert
+ - nbformat
+ - networkx>=2.0
  - numba
  - numpy
  - pandas
@@ -27,22 +39,19 @@ dependencies:
  - paramnb
  - pyproj
  - pytables
- - pytest
+ - python-snappy
  - python=3.6
  - rasterio
  - requests
  - scikit-image
  - scipy
  - shapely
+ - snappy
  - statsmodels
  - tblib
- - gbrener::xarray>=0.9.6 # For xarray.open_rasterio()
  - yaml
- - fastparquet
- - snappy
- - python-snappy
- - jupyter_dashboards
  - pip:
    - cachey
+   - streamz==0.2.0
    - webargs
 

@@ -1,6 +1,6 @@
 from __future__ import absolute_import
 
-__version__ = '0.6.2dev2'
+__version__ = '0.6.2'
 
 from .core import Canvas                                 # noqa (API import)
 from .reductions import (count, any, sum, min, max,      # noqa (API import)
@@ -25,7 +25,7 @@ def test():
         import sys
         sys.stderr.write("You need to install py.test to run tests.\n\n")
         raise
-    pytest.main(os.path.dirname(__file__))
+    pytest.main([os.path.dirname(__file__)])
 
 
 def examples(path='datashader-examples', verbose=False):

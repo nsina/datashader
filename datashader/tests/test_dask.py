@@ -1,15 +1,16 @@
-from dask.local import get_sync
-from dask.context import set_options
+from __future__ import division, absolute_import
+from dask.context import config
 import dask.dataframe as dd
 import numpy as np
 import pandas as pd
 import xarray as xr
 
 import datashader as ds
+import datashader.utils as du
 
 import pytest
 
-set_options(get=get_sync)
+config.set(scheduler='synchronous')
 
 df = pd.DataFrame({'x': np.array(([0.] * 10 + [1] * 10)),
                    'y': np.array(([0.] * 5 + [1] * 5 + [0] * 5 + [1] * 5)),
@@ -194,8 +195,8 @@ def test_auto_range_points():
     agg = cvs.points(ddf, 'x', 'y', ds.count('time'))
     sol = np.zeros((2*n, 2*n), int)
     np.fill_diagonal(sol, 1)
-    sol[[range(1, 4, 2)]] = 0
-    sol[[range(4, 8, 2)]] = 0
+    sol[[tuple(range(1, 4, 2))]] = 0
+    sol[[tuple(range(4, 8, 2))]] = 0
     np.testing.assert_equal(agg.data, sol)
 
     cvs = ds.Canvas(plot_width=2*n+1, plot_height=2*n+1)
@@ -283,6 +284,191 @@ def test_line():
     assert_eq(agg, out)
 
 
+# # Line tests
+@pytest.mark.parametrize('df,x,y,ax', [
+    # axis1 none constant
+    (pd.DataFrame({
+        'x0': [4, -4, 4],
+        'x1': [0,  0, 0],
+        'x2': [-4, 4, -4],
+        'y0': [0,  0, 0],
+        'y1': [-4, 4, 0],
+        'y2': [0,  0, 0]
+    }), ['x0', 'x1', 'x2'], ['y0', 'y1', 'y2'], 1),
+
+    # axis1 x constant
+    (pd.DataFrame({
+        'y0': [0, 0,  0],
+        'y1': [0, 4, -4],
+        'y2': [0, 0,  0]
+    }), np.array([-4, 0, 4]), ['y0', 'y1', 'y2'], 1),
+
+    # axis0 single
+    (pd.DataFrame({
+        'x': [4, 0, -4, np.nan, -4, 0, 4, np.nan, 4, 0, -4],
+        'y': [0, -4, 0, np.nan, 0, 4, 0, np.nan, 0, 0, 0],
+    }), 'x', 'y', 0),
+
+    # axis0 multi
+    (pd.DataFrame({
+        'x0': [4,  0, -4],
+        'x1': [-4, 0,  4],
+        'x2': [4,  0, -4],
+        'y0': [0, -4,  0],
+        'y1': [0,  4,  0],
+        'y2': [0,  0,  0]
+    }), ['x0', 'x1', 'x2'], ['y0', 'y1', 'y2'], 0),
+
+    # axis0 multi with string
+    (pd.DataFrame({
+        'x0': [-4,  0, 4],
+        'y0': [0, -4,  0],
+        'y1': [0,  4,  0],
+        'y2': [0,  0,  0]
+    }), 'x0', ['y0', 'y1', 'y2'], 0),
+
+    # axis1 RaggedArray
+    (pd.DataFrame({
+        'x': [[4, 0, -4], [-4, 0, 4, 4, 0, -4]],
+        'y': [[0, -4, 0], [0, 4, 0, 0, 0, 0]],
+    }, dtype='Ragged[int64]'), 'x', 'y', 1),
+])
+def test_line_manual_range(df, x, y, ax):
+    axis = ds.core.LinearAxis()
+    lincoords = axis.compute_index(axis.compute_scale_and_translate((-3., 3.), 7), 7)
+
+    ddf = dd.from_pandas(df, npartitions=2)
+
+    cvs = ds.Canvas(plot_width=7, plot_height=7,
+                    x_range=(-3, 3), y_range=(-3, 3))
+
+    agg = cvs.line(ddf, x, y, ds.count(), axis=ax)
+
+    sol = np.array([[0, 0, 1, 0, 1, 0, 0],
+                    [0, 1, 0, 0, 0, 1, 0],
+                    [1, 0, 0, 0, 0, 0, 1],
+                    [1, 1, 1, 1, 1, 1, 1],
+                    [1, 0, 0, 0, 0, 0, 1],
+                    [0, 1, 0, 0, 0, 1, 0],
+                    [0, 0, 1, 0, 1, 0, 0]], dtype='i4')
+
+    out = xr.DataArray(sol, coords=[lincoords, lincoords],
+                       dims=['y', 'x'])
+    assert_eq(agg, out)
+
+
+@pytest.mark.parametrize('df,x,y,ax', [
+    # axis1 none constant
+    (pd.DataFrame({
+        'x0': [0,  0, 0],
+        'x1': [-4, 0, 4],
+        'x2': [0,  0, 0],
+        'y0': [-4, 4, -4],
+        'y1': [0,  0,  0],
+        'y2': [4, -4,  4]
+    }), ['x0', 'x1', 'x2'], ['y0', 'y1', 'y2'], 1),
+
+    # axis1 y constant
+    (pd.DataFrame({
+        'x0': [0,  0, 0],
+        'x1': [-4, 0, 4],
+        'x2': [0,  0, 0],
+    }), ['x0', 'x1', 'x2'], np.array([-4, 0, 4]), 1),
+
+    # axis0 single
+    (pd.DataFrame({
+        'x': [0, -4, 0, np.nan, 0, 0, 0, np.nan, 0, 4, 0],
+        'y': [-4, 0, 4, np.nan, 4, 0, -4, np.nan, -4, 0, 4],
+    }), 'x', 'y', 0),
+
+    # axis0 multi
+    (pd.DataFrame({
+        'x0': [0, -4,  0],
+        'x1': [0,  0,  0],
+        'x2': [0,  4,  0],
+        'y0': [-4, 0,  4],
+        'y1': [4,  0, -4],
+        'y2': [-4, 0,  4]
+    }), ['x0', 'x1', 'x2'], ['y0', 'y1', 'y2'], 0),
+
+    # axis0 multi with string
+    (pd.DataFrame({
+        'x0': [0, -4,  0],
+        'x1': [0,  0,  0],
+        'x2': [0,  4,  0],
+        'y0': [-4, 0,  4]
+    }), ['x0', 'x1', 'x2'], 'y0', 0),
+
+    # axis1 RaggedArray
+    (pd.DataFrame({
+        'x': [[0, -4, 0], [0, 0, 0], [0, 4, 0]],
+        'y': [[-4, 0, 4], [4, 0, -4], [-4, 0, 4]],
+    }, dtype='Ragged[int64]'), 'x', 'y', 1),
+
+])
+def test_line_autorange(df, x, y, ax):
+    axis = ds.core.LinearAxis()
+    lincoords = axis.compute_index(
+        axis.compute_scale_and_translate((-4., 4.), 9), 9)
+
+    ddf = dd.from_pandas(df, npartitions=2)
+
+    cvs = ds.Canvas(plot_width=9, plot_height=9)
+
+    agg = cvs.line(ddf, x, y, ds.count(), axis=ax)
+
+    sol = np.array([[0, 0, 0, 0, 3, 0, 0, 0, 0],
+                    [0, 0, 0, 1, 1, 1, 0, 0, 0],
+                    [0, 0, 1, 0, 1, 0, 1, 0, 0],
+                    [0, 1, 0, 0, 1, 0, 0, 1, 0],
+                    [1, 0, 0, 0, 1, 0, 0, 0, 1],
+                    [0, 1, 0, 0, 1, 0, 0, 1, 0],
+                    [0, 0, 1, 0, 1, 0, 1, 0, 0],
+                    [0, 0, 0, 1, 1, 1, 0, 0, 0],
+                    [0, 0, 0, 0, 3, 0, 0, 0, 0]], dtype='i4')
+
+    out = xr.DataArray(sol, coords=[lincoords, lincoords],
+                       dims=['y', 'x'])
+    assert_eq(agg, out)
+
+
+def test_line_x_constant_autorange():
+    # axis1 y constant
+    df = pd.DataFrame({
+        'y0': [0, 0, 0],
+        'y1': [-4, 0, 4],
+        'y2': [0, 0, 0],
+    })
+
+    x = np.array([-4, 0, 4])
+    y = ['y0', 'y1', 'y2']
+    ax = 1
+
+    axis = ds.core.LinearAxis()
+    lincoords = axis.compute_index(
+        axis.compute_scale_and_translate((-4., 4.), 9), 9)
+
+    ddf = dd.from_pandas(df, npartitions=2)
+
+    cvs = ds.Canvas(plot_width=9, plot_height=9)
+
+    agg = cvs.line(ddf, x, y, ds.count(), axis=ax)
+
+    sol = np.array([[0, 0, 0, 0, 1, 0, 0, 0, 0],
+                    [0, 0, 0, 1, 0, 1, 0, 0, 0],
+                    [0, 0, 1, 0, 0, 0, 1, 0, 0],
+                    [0, 1, 0, 0, 0, 0, 0, 1, 0],
+                    [3, 1, 1, 1, 1, 1, 1, 1, 3],
+                    [0, 1, 0, 0, 0, 0, 0, 1, 0],
+                    [0, 0, 1, 0, 0, 0, 1, 0, 0],
+                    [0, 0, 0, 1, 0, 1, 0, 0, 0],
+                    [0, 0, 0, 0, 1, 0, 0, 0, 0]], dtype='i4')
+
+    out = xr.DataArray(sol, coords=[lincoords, lincoords],
+                       dims=['y', 'x'])
+    assert_eq(agg, out)
+
+
 def test_log_axis_line():
     axis = ds.core.LogAxis()
     logcoords = axis.compute_index(axis.compute_scale_and_translate((1, 10), 2), 2)
@@ -319,3 +505,415 @@ def test_auto_range_line():
     out = xr.DataArray(sol, coords=[lincoords, lincoords],
                        dims=['y', 'x'])
     assert_eq(agg, out)
+
+
+@pytest.mark.parametrize('df,x,y,ax', [
+    # axis1 none constant
+    (pd.DataFrame({
+        'x0': [-4, np.nan],
+        'x1': [-2, 2],
+        'x2': [0, 4],
+        'y0': [0, np.nan],
+        'y1': [-4, 4],
+        'y2': [0, 0]
+    }, dtype='float32'), ['x0', 'x1', 'x2'], ['y0', 'y1', 'y2'], 1),
+
+    # axis0 single
+    (pd.DataFrame({
+        'x': [-4, -2, 0, np.nan, 2, 4],
+        'y': [0, -4, 0, np.nan, 4, 0],
+    }), 'x', 'y', 0),
+
+    # axis0 multi
+    (pd.DataFrame({
+        'x0': [-4, -2, 0],
+        'x1': [np.nan, 2, 4],
+        'y0': [0, -4, 0],
+        'y1': [np.nan, 4, 0],
+    }, dtype='float32'), ['x0', 'x1'], ['y0', 'y1'], 0),
+
+    # axis1 ragged arrays
+    (pd.DataFrame({
+        'x': pd.array([[-4, -2, 0], [2, 4]], dtype='Ragged[float32]'),
+        'y': pd.array([[0, -4, 0], [4, 0]], dtype='Ragged[float32]')
+    }), 'x', 'y', 1)
+])
+def test_area_to_zero_fixedrange(df, x, y, ax):
+    axis = ds.core.LinearAxis()
+    lincoords_y = axis.compute_index(
+        axis.compute_scale_and_translate((-2.25, 2.25), 5), 5)
+
+    lincoords_x = axis.compute_index(
+        axis.compute_scale_and_translate((-3.75, 3.75), 9), 9)
+
+    cvs = ds.Canvas(plot_width=9, plot_height=5,
+                    x_range=[-3.75, 3.75], y_range=[-2.25, 2.25])
+
+    ddf = dd.from_pandas(df, npartitions=2)
+
+    agg = cvs.area(ddf, x, y, ds.count(), axis=ax)
+
+    sol = np.array([[0, 1, 1, 0, 0, 0, 0, 0, 0],
+                    [1, 1, 1, 1, 0, 0, 0, 0, 0],
+                    [1, 1, 1, 1, 1, 0, 1, 1, 1],
+                    [0, 0, 0, 0, 0, 0, 1, 1, 1],
+                    [0, 0, 0, 0, 0, 0, 1, 1, 0]],
+                   dtype='i4')
+
+    out = xr.DataArray(sol, coords=[lincoords_y, lincoords_x],
+                       dims=['y', 'x'])
+    assert_eq(agg, out)
+
+
+@pytest.mark.parametrize('df,x,y,ax', [
+    # axis1 none constant
+    (pd.DataFrame({
+        'x0': [-4, 0],
+        'x1': [-2, 2],
+        'x2': [0, 4],
+        'y0': [0, 0],
+        'y1': [-4, -4],
+        'y2': [0, 0]
+    }, dtype='float32'), ['x0', 'x1', 'x2'], ['y0', 'y1', 'y2'], 1),
+
+    # axis1 y constant
+    (pd.DataFrame({
+        'x0': [-4, 0],
+        'x1': [-2, 2],
+        'x2': [0, 4],
+    }, dtype='float32'),
+     ['x0', 'x1', 'x2'], np.array([0, -4, 0], dtype='float32'), 1),
+
+    # axis0 single
+    (pd.DataFrame({
+        'x': [-4, -2, 0, 0, 2, 4],
+        'y': [0, -4, 0, 0, -4, 0],
+    }), 'x', 'y', 0),
+
+    # axis0 multi
+    (pd.DataFrame({
+        'x0': [-4, -2, 0],
+        'x1': [0, 2, 4],
+        'y0': [0, -4, 0],
+        'y1': [0, -4, 0],
+    }, dtype='float32'), ['x0', 'x1'], ['y0', 'y1'], 0),
+
+    # axis0 multi, y string
+    (pd.DataFrame({
+        'x0': [-4, -2, 0],
+        'x1': [0, 2, 4],
+        'y0': [0, -4, 0],
+    }, dtype='float32'), ['x0', 'x1'], 'y0', 0),
+
+    # axis1 ragged arrays
+    (pd.DataFrame({
+        'x': pd.array([[-4, -2, 0], [0, 2, 4]], dtype='Ragged[float32]'),
+        'y': pd.array([[0, -4, 0], [0, -4, 0]], dtype='Ragged[float32]')
+    }), 'x', 'y', 1)
+])
+def test_area_to_zero_autorange(df, x, y, ax):
+    axis = ds.core.LinearAxis()
+    lincoords_y = axis.compute_index(
+        axis.compute_scale_and_translate((-4., 0.), 7), 7)
+    lincoords_x = axis.compute_index(
+        axis.compute_scale_and_translate((-4., 4.), 13), 13)
+
+    cvs = ds.Canvas(plot_width=13, plot_height=7)
+
+    ddf = dd.from_pandas(df, npartitions=2)
+    agg = cvs.area(ddf, x, y, ds.count(), axis=ax)
+
+    sol = np.array([[0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0],
+                    [0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0],
+                    [0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0],
+                    [0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0],
+                    [0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0],
+                    [0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0],
+                    [1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1]],
+                   dtype='i4')
+
+    out = xr.DataArray(sol, coords=[lincoords_y, lincoords_x],
+                       dims=['y', 'x'])
+    assert_eq(agg, out)
+
+
+@pytest.mark.parametrize('df,x,y,ax', [
+    # axis1 none constant
+    (pd.DataFrame({
+        'x0': [-4, np.nan],
+        'x1': [-2, 2],
+        'x2': [0, 4],
+        'y0': [0, np.nan],
+        'y1': [-4, 4],
+        'y2': [0, 0]
+    }, dtype='float32'), ['x0', 'x1', 'x2'], ['y0', 'y1', 'y2'], 1),
+
+    # axis0 single
+    (pd.DataFrame({
+        'x': [-4, -2, 0, np.nan, 2, 4],
+        'y': [0, -4, 0, np.nan, 4, 0],
+    }), 'x', 'y', 0),
+
+    # axis0 multi
+    (pd.DataFrame({
+        'x0': [-4, -2, 0],
+        'x1': [np.nan, 2, 4],
+        'y0': [0, -4, 0],
+        'y1': [np.nan, 4, 0],
+    }, dtype='float32'), ['x0', 'x1'], ['y0', 'y1'], 0),
+
+    # axis1 ragged arrays
+    (pd.DataFrame({
+        'x': pd.array([[-4, -2, 0], [2, 4]], dtype='Ragged[float32]'),
+        'y': pd.array([[0, -4, 0], [4, 0]], dtype='Ragged[float32]')
+    }), 'x', 'y', 1)
+])
+def test_area_to_zero_autorange_gap(df, x, y, ax):
+    axis = ds.core.LinearAxis()
+    lincoords_y = axis.compute_index(
+        axis.compute_scale_and_translate((-4., 4.), 7), 7)
+    lincoords_x = axis.compute_index(
+        axis.compute_scale_and_translate((-4., 4.), 13), 13)
+
+    cvs = ds.Canvas(plot_width=13, plot_height=7)
+
+    ddf = dd.from_pandas(df, npartitions=2)
+
+    agg = cvs.area(ddf, x, y, ds.count(), axis=ax)
+
+    sol = np.array([[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    [0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+                    [0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
+                    [1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1],
+                    [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0],
+                    [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0],
+                    [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]],
+                   dtype='i4')
+
+    out = xr.DataArray(sol, coords=[lincoords_y, lincoords_x],
+                       dims=['y', 'x'])
+    assert_eq(agg, out)
+
+
+@pytest.mark.parametrize('df,x,y,y_stack,ax', [
+    # axis1 none constant
+    (pd.DataFrame({
+        'x0': [-4, 0],
+        'x1': [-2, 2],
+        'x2': [0, 4],
+        'y0': [0, 0],
+        'y1': [-4, -4],
+        'y2': [0, 0],
+        'y3': [0, 0],
+        'y4': [-2, -2],
+        'y5': [0, 0],
+    }, dtype='float32'),
+     ['x0', 'x1', 'x2'], ['y0', 'y1', 'y2'], ['y3', 'y4', 'y5'], 1),
+
+    # axis1 y constant
+    (pd.DataFrame({
+        'x0': [-4, 0],
+        'x1': [-2, 2],
+        'x2': [0, 4],
+    }, dtype='float32'),
+     ['x0', 'x1', 'x2'],
+     np.array([0, -4, 0]),
+     np.array([0, -2, 0], dtype='float32'), 1),
+
+    # axis0 single
+    (pd.DataFrame({
+        'x': [-4, -2, 0, 0, 2, 4],
+        'y': [0, -4, 0, 0, -4, 0],
+        'y_stack': [0, -2, 0, 0, -2, 0],
+    }), 'x', 'y', 'y_stack', 0),
+
+    # axis0 multi
+    (pd.DataFrame({
+        'x0': [-4, -2, 0],
+        'x1': [0, 2, 4],
+        'y0': [0, -4, 0],
+        'y1': [0, -4, 0],
+        'y2': [0, -2, 0],
+        'y3': [0, -2, 0],
+    }, dtype='float32'), ['x0', 'x1'], ['y0', 'y1'], ['y2', 'y3'], 0),
+
+    # axis0 multi, y string
+    (pd.DataFrame({
+        'x0': [-4, -2, 0],
+        'x1': [0, 2, 4],
+        'y0': [0, -4, 0],
+        'y2': [0, -2, 0],
+    }, dtype='float32'), ['x0', 'x1'], 'y0', 'y2', 0),
+
+    # axis1 ragged arrays
+    (pd.DataFrame({
+        'x': pd.array([[-4, -2, 0], [0, 2, 4]], dtype='Ragged[float32]'),
+        'y': pd.array([[0, -4, 0], [0, -4, 0]], dtype='Ragged[float32]'),
+        'y_stack': pd.array([[0, -2, 0], [0, -2, 0]], dtype='Ragged[float32]')
+    }), 'x', 'y', 'y_stack', 1)
+])
+def test_area_to_line_autorange(df, x, y, y_stack, ax):
+    axis = ds.core.LinearAxis()
+    lincoords_y = axis.compute_index(
+        axis.compute_scale_and_translate((-4., 0.), 7), 7)
+    lincoords_x = axis.compute_index(
+        axis.compute_scale_and_translate((-4., 4.), 13), 13)
+
+    cvs = ds.Canvas(plot_width=13, plot_height=7)
+
+    ddf = dd.from_pandas(df, npartitions=2)
+    agg = cvs.area(ddf, x, y, ds.count(), axis=ax, y_stack=y_stack)
+
+    sol = np.array([[0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0],
+                    [0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0],
+                    [0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0],
+                    [0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0],
+                    [0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0],
+                    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]],
+                   dtype='i4')
+
+    out = xr.DataArray(sol, coords=[lincoords_y, lincoords_x],
+                       dims=['y', 'x'])
+    assert_eq(agg, out)
+
+
+@pytest.mark.parametrize('df,x,y,y_stack,ax', [
+    # axis1 none constant
+    (pd.DataFrame({
+        'x0': [-4, np.nan],
+        'x1': [-2, 2],
+        'x2': [0, 4],
+        'y0': [0, np.nan],
+        'y1': [-4, 4],
+        'y2': [0, 0],
+        'y4': [0, 0],
+        'y5': [0, 0],
+        'y6': [0, 0]
+    }, dtype='float32'),
+     ['x0', 'x1', 'x2'], ['y0', 'y1', 'y2'], ['y4', 'y5', 'y6'], 1),
+
+    # axis0 single
+    (pd.DataFrame({
+        'x': [-4, -2, 0, np.nan, 2, 4],
+        'y': [0, -4, 0, np.nan, 4, 0],
+        'y_stack': [0, 0, 0, 0, 0, 0],
+    }), 'x', 'y', 'y_stack', 0),
+
+    # axis0 multi
+    (pd.DataFrame({
+        'x0': [-4, -2, 0],
+        'x1': [np.nan, 2, 4],
+        'y0': [0, -4, 0],
+        'y1': [np.nan, 4, 0],
+        'y2': [0, 0, 0],
+        'y3': [0, 0, 0],
+    }, dtype='float32'), ['x0', 'x1'], ['y0', 'y1'], ['y2', 'y3'], 0),
+
+    # axis1 ragged arrays
+    (pd.DataFrame({
+        'x': pd.array([[-4, -2, 0], [2, 4]], dtype='Ragged[float32]'),
+        'y': pd.array([[0, -4, 0], [4, 0]], dtype='Ragged[float32]'),
+        'y_stack': pd.array([[0, 0, 0], [0, 0]], dtype='Ragged[float32]')
+    }), 'x', 'y', 'y_stack', 1)
+])
+def test_area_to_line_autorange_gap(df, x, y, y_stack, ax):
+    axis = ds.core.LinearAxis()
+    lincoords_y = axis.compute_index(
+        axis.compute_scale_and_translate((-4., 4.), 7), 7)
+    lincoords_x = axis.compute_index(
+        axis.compute_scale_and_translate((-4., 4.), 13), 13)
+
+    cvs = ds.Canvas(plot_width=13, plot_height=7)
+
+    ddf = dd.from_pandas(df, npartitions=2)
+
+    # When a line is specified to fill to, this line is not included in
+    # the fill.  So we expect the y=0 line to not be filled.
+    agg = cvs.area(ddf, x, y, ds.count(), y_stack=y_stack, axis=ax)
+
+    sol = np.array([[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    [0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+                    [0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
+                    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0],
+                    [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0],
+                    [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]],
+                   dtype='i4')
+
+    out = xr.DataArray(sol, coords=[lincoords_y, lincoords_x],
+                       dims=['y', 'x'])
+    assert_eq(agg, out)
+
+
+def test_trimesh_no_double_edge():
+    """Assert that when two triangles share an edge that would normally get
+    double-drawn, the edge is only drawn for the rightmost (or bottommost)
+    triangle.
+    """
+    import multiprocessing as mp
+    # Test left/right edge shared
+    verts = dd.from_pandas(pd.DataFrame({'x': [4, 1, 5, 5, 5, 4],
+                                         'y': [4, 5, 5, 5, 4, 4]}), npartitions=mp.cpu_count())
+    tris = dd.from_pandas(pd.DataFrame({'v0': [0, 3], 'v1': [1, 4], 'v2': [2, 5], 'val': [1, 2]}), npartitions=mp.cpu_count())
+    # Plot dims and x/y ranges need to be set such that the edge is drawn twice:
+    cvs = ds.Canvas(plot_width=20, plot_height=20, x_range=(0, 5), y_range=(0, 5))
+    agg = cvs.trimesh(verts, tris)
+    sol = np.array([
+        [0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ], dtype='i4')
+    np.testing.assert_array_equal(np.flipud(agg.fillna(0).astype('i4').values)[:5], sol)
+
+
+@pytest.mark.parametrize('npartitions', list(range(1, 6)))
+def test_trimesh_dask_partitions(npartitions):
+    """Assert that when two triangles share an edge that would normally get
+    double-drawn, the edge is only drawn for the rightmost (or bottommost)
+    triangle.
+    """
+    # Test left/right edge shared
+    verts = dd.from_pandas(pd.DataFrame({'x': [4, 1, 5, 5, 5, 4],
+                                         'y': [4, 5, 5, 5, 4, 4]}),
+                           npartitions=npartitions)
+    tris = dd.from_pandas(
+        pd.DataFrame(
+            {'v0': [0, 3], 'v1': [1, 4], 'v2': [2, 5], 'val': [1, 2]}),
+        npartitions=npartitions)
+
+    cvs = ds.Canvas(plot_width=20, plot_height=20,
+                    x_range=(0, 5), y_range=(0, 5))
+
+    # Precompute mesh with dask dataframes
+    mesh = du.mesh(verts, tris)
+
+    # Make sure mesh is a dask DataFrame
+    assert isinstance(mesh, dd.DataFrame)
+
+    # Check mesh length
+    n = len(mesh)
+    assert n == 6
+
+    # Make sure we have expected number of partitions
+    expected_chunksize = int(np.ceil(len(mesh) / (3*npartitions)) * 3)
+    expected_npartitions = int(np.ceil(n / expected_chunksize))
+    assert expected_npartitions == mesh.npartitions
+
+    # Make sure triangles don't straddle partitions
+    partitions_lens = mesh.map_partitions(len).compute()
+    for partitions_len in partitions_lens:
+        assert partitions_len % 3 == 0
+
+    agg = cvs.trimesh(verts, tris, mesh)
+    sol = np.array([
+        [0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ], dtype='i4')
+    np.testing.assert_array_equal(
+        np.flipud(agg.fillna(0).astype('i4').values)[:5], sol)

@@ -1,14 +1,15 @@
 from __future__ import absolute_import, division
 
-import dask.dataframe as dd
-from dask.base import tokenize, compute
-from dask.context import _globals
+import dask
 import pandas as pd
+import dask.dataframe as dd
+from collections import OrderedDict
+from dask.base import tokenize, compute
 
 from .core import bypixel
 from .compatibility import apply
 from .compiler import compile_components
-from .glyphs import Glyph, Line
+from .glyphs import Glyph, LineAxis0
 from .utils import Dispatcher
 
 __all__ = ()
@@ -18,18 +19,26 @@ __all__ = ()
 def dask_pipeline(df, schema, canvas, glyph, summary):
     dsk, name = glyph_dispatch(glyph, df, schema, canvas, summary)
 
-    get = _globals['get'] or getattr(df, '__dask_scheduler__', None) or df._default_get
-    keys = getattr(df, '__dask_keys__', None) or df._keys
-    optimize = getattr(df, '__dask_optimize__', None) or df._optimize
+    # Get user configured scheduler (if any), or fall back to default
+    # scheduler for dask DataFrame
+    scheduler = dask.base.get_scheduler() or df.__dask_scheduler__
+    keys = df.__dask_keys__()
+    optimize = df.__dask_optimize__
+    graph = df.__dask_graph__()
 
-    dsk.update(optimize(df.dask, keys()))
+    dsk.update(optimize(graph, keys))
 
-    return get(dsk, name)
+    return scheduler(dsk, name)
 
 
 def shape_bounds_st_and_axis(df, canvas, glyph):
-    x_range = canvas.x_range or glyph._compute_x_bounds_dask(df)
-    y_range = canvas.y_range or glyph._compute_y_bounds_dask(df)
+    if not canvas.x_range or not canvas.y_range:
+        x_extents, y_extents = glyph.compute_bounds_dask(df)
+    else:
+        x_extents, y_extents = None, None
+
+    x_range = canvas.x_range or x_extents
+    y_range = canvas.y_range or y_extents
     x_min, x_max, y_min, y_max = bounds = compute(*(x_range + y_range))
     x_range, y_range = (x_min, x_max), (y_min, y_max)
 
@@ -43,7 +52,7 @@ def shape_bounds_st_and_axis(df, canvas, glyph):
 
     x_axis = canvas.x_axis.compute_index(x_st, width)
     y_axis = canvas.y_axis.compute_index(y_st, height)
-    axis = [y_axis, x_axis]
+    axis = OrderedDict([(glyph.x_label, x_axis), (glyph.y_label, y_axis)])
 
     return shape, bounds, st, axis
 
@@ -56,8 +65,8 @@ def default(glyph, df, schema, canvas, summary):
     shape, bounds, st, axis = shape_bounds_st_and_axis(df, canvas, glyph)
 
     # Compile functions
-    create, info, append, combine, finalize = compile_components(summary,
-                                                                 schema)
+    create, info, append, combine, finalize = \
+        compile_components(summary, schema, glyph)
     x_mapper = canvas.x_axis.mapper
     y_mapper = canvas.y_axis.mapper
     extend = glyph._build_extend(x_mapper, y_mapper, info, append)
@@ -67,23 +76,22 @@ def default(glyph, df, schema, canvas, summary):
         extend(aggs, df, st, bounds)
         return aggs
 
-    name = tokenize(df._name, canvas, glyph, summary)
-    dask_dataframe_keys = getattr(df, '__dask_keys__', None) or df._keys
-    keys = dask_dataframe_keys()
+    name = tokenize(df.__dask_tokenize__(), canvas, glyph, summary)
+    keys = df.__dask_keys__()
     keys2 = [(name, i) for i in range(len(keys))]
     dsk = dict((k2, (chunk, k)) for (k2, k) in zip(keys2, keys))
     dsk[name] = (apply, finalize, [(combine, keys2)],
-                 dict(coords=axis, dims=[glyph.y, glyph.x]))
+                 dict(coords=axis, dims=[glyph.y_label, glyph.x_label]))
     return dsk, name
 
 
-@glyph_dispatch.register(Line)
+@glyph_dispatch.register(LineAxis0)
 def line(glyph, df, schema, canvas, summary):
     shape, bounds, st, axis = shape_bounds_st_and_axis(df, canvas, glyph)
 
     # Compile functions
-    create, info, append, combine, finalize = compile_components(summary,
-                                                                 schema)
+    create, info, append, combine, finalize = \
+        compile_components(summary, schema, glyph)
     x_mapper = canvas.x_axis.mapper
     y_mapper = canvas.y_axis.mapper
     extend = glyph._build_extend(x_mapper, y_mapper, info, append)
@@ -97,12 +105,12 @@ def line(glyph, df, schema, canvas, summary):
         extend(aggs, df, st, bounds, plot_start=plot_start)
         return aggs
 
-    name = tokenize(df._name, canvas, glyph, summary)
-    old_name = df._name
+    name = tokenize(df.__dask_tokenize__(), canvas, glyph, summary)
+    old_name = df.__dask_tokenize__()
     dsk = {(name, 0): (chunk, (old_name, 0))}
     for i in range(1, df.npartitions):
         dsk[(name, i)] = (chunk, (old_name, i - 1), (old_name, i))
     keys2 = [(name, i) for i in range(df.npartitions)]
     dsk[name] = (apply, finalize, [(combine, keys2)],
-                 dict(coords=axis, dims=[glyph.y, glyph.x]))
+                 dict(coords=axis, dims=[glyph.y_label, glyph.x_label]))
     return dsk, name

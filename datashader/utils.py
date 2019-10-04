@@ -9,9 +9,49 @@ import numpy as np
 import pandas as pd
 
 from xarray import DataArray
+import dask.dataframe as dd
 import datashape
 
+try:
+    from datashader.datatypes import RaggedDtype
+except ImportError:
+    RaggedDtype = type(None)
+
 ngjit = nb.jit(nopython=True, nogil=True)
+
+
+class Expr(object):
+    """Base class for expression-like objects.
+
+    Implements hashing and equality checks. Subclasses should implement an
+    ``inputs`` attribute/property, containing a tuple of everything that fully
+    defines that expression.
+    """
+    def __hash__(self):
+        return hash((type(self), self._hashable_inputs()))
+
+    def __eq__(self, other):
+        return (type(self) is type(other) and
+                self._hashable_inputs() == other._hashable_inputs())
+
+    def __ne__(self, other):
+        return not self == other
+
+    def _hashable_inputs(self):
+        """
+        Return a version of the inputs tuple that is suitable for hashing and
+        equality comparisons
+        """
+        result = []
+        for ip in self.inputs:
+            if isinstance(ip, (list, set)):
+                result.append(tuple(ip))
+            elif isinstance(ip, np.ndarray):
+                result.append(ip.tobytes())
+            else:
+                result.append(ip)
+
+        return tuple(result)
 
 
 class Dispatcher(object):
@@ -19,15 +59,15 @@ class Dispatcher(object):
     def __init__(self):
         self._lookup = {}
 
-    def register(self, type, func=None):
-        """Register dispatch of `func` on arguments of type `type`"""
+    def register(self, typ, func=None):
+        """Register dispatch of `func` on arguments of type `typ`"""
         if func is None:
-            return lambda f: self.register(type, f)
-        if isinstance(type, tuple):
-            for t in type:
+            return lambda f: self.register(typ, f)
+        if isinstance(typ, tuple):
+            for t in typ:
                 self.register(t, func)
         else:
-            self._lookup[type] = func
+            self._lookup[typ] = func
         return func
 
     def __call__(self, head, *rest, **kwargs):
@@ -79,7 +119,7 @@ def calc_bbox(xs, ys, res):
     """Calculate the bounding box of a raster, and return it in a four-element
     tuple: (xmin, ymin, xmax, ymax). This calculation assumes the raster is
     uniformly sampled (equivalent to a flat-earth assumption, for geographic
-    data) so that an affine transform (using the "Augmented Matrix" approach) 
+    data) so that an affine transform (using the "Augmented Matrix" approach)
     suffices:
     https://en.wikipedia.org/wiki/Affine_transformation#Augmented_matrix
 
@@ -135,7 +175,10 @@ def get_indices(start, end, coords, res):
     vmin, vmax = coords.min(), coords.max()
     span = vmax-vmin
     start, end = start+half-vmin, end-half-vmin
-    return int((start/span)*size), int((end/span)*size)
+    sidx, eidx = int((start/span)*size), int((end/span)*size)
+    if eidx < sidx:
+        return sidx, sidx
+    return sidx, eidx
 
 
 def orient_array(raster, res=None, layer=None):
@@ -324,13 +367,15 @@ def dshape_from_pandas_helper(col):
         ))
         return datashape.Categorical(col.cat.categories.values,
                                      type=cat_dshape,
-                                     ordered=col.cat.categorical.ordered)
+                                     ordered=col.cat.ordered)
     elif col.dtype.kind == 'M':
         tz = getattr(col.dtype, 'tz', None)
         if tz is not None:
             # Pandas stores this as a pytz.tzinfo, but DataShape wants a string
             tz = str(tz)
         return datashape.Option(datashape.DateTime(tz=tz))
+    elif isinstance(col.dtype, RaggedDtype):
+        return col.dtype
     dshape = datashape.CType.from_numpy_dtype(col.dtype)
     dshape = datashape.string if dshape == datashape.object_ else dshape
     if dshape in (datashape.string, datashape.datetime_):
@@ -349,13 +394,17 @@ def dshape_from_dask(df):
     return datashape.var * dshape_from_pandas(df.head()).measure
 
 
-categoricals_in_dtypes = np.vectorize(lambda dtype: dtype.name == 'category', otypes='?')
-def categorical_in_dtypes(dtype_arr):
-    return categoricals_in_dtypes(dtype_arr).any()
+def dshape_from_xarray_dataset(xr_ds):
+    """Return a datashape.DataShape object given a xarray Dataset."""
+    return datashape.var * datashape.Record([
+        (k, dshape_from_pandas_helper(xr_ds[k]))
+        for k in list(xr_ds.data_vars) + list(xr_ds.coords)
+    ])
+
 
 def dataframe_from_multiple_sequences(x_values, y_values):
    """
-   Converts a set of multiple sequences (eg: time series), stored as a 2 dimensional 
+   Converts a set of multiple sequences (eg: time series), stored as a 2 dimensional
    numpy array into a pandas dataframe that can be plotted by datashader.
    The pandas dataframe eventually contains two columns ('x' and 'y') with the data.
    Each time series is separated by a row of NaNs.
@@ -365,7 +414,7 @@ def dataframe_from_multiple_sequences(x_values, y_values):
    y_values: 2D numpy array with the sequences to be plotted of shape (num sequences X length of each sequence)
 
    """
-   
+
    # Add a NaN at the end of the array of x values
    x = np.zeros(x_values.shape[0] + 1)
    x[-1] = np.nan
@@ -382,4 +431,74 @@ def dataframe_from_multiple_sequences(x_values, y_values):
    # Return a dataframe with this new set of x and y values
    return pd.DataFrame({'x': x, 'y': y.flatten()})
 
-   
+
+def _pd_mesh(vertices, simplices):
+    """Helper for ``datashader.utils.mesh()``. Both arguments are assumed to be
+    Pandas DataFrame objects.
+    """
+    # Winding auto-detect
+    winding = [0, 1, 2]
+    first_tri = vertices.values[simplices.values[0, winding].astype(np.int64), :2]
+    a, b, c = first_tri
+    if np.cross(b-a, c-a).item() >= 0:
+        winding = [0, 2, 1]
+
+    # Construct mesh by indexing into vertices with simplex indices
+    vertex_idxs = simplices.values[:, winding]
+    if not vertex_idxs.dtype == 'int64':
+        vertex_idxs = vertex_idxs.astype(np.int64)
+    vals = np.take(vertices.values, vertex_idxs, axis=0)
+    vals = vals.reshape(np.prod(vals.shape[:2]), vals.shape[2])
+    res = pd.DataFrame(vals, columns=vertices.columns)
+
+    # If vertices don't have weights, use simplex weights
+    verts_have_weights = len(vertices.columns) > 2
+    if not verts_have_weights:
+        weight_col = simplices.columns[3]
+        res[weight_col] = simplices.values[:, 3].repeat(3)
+
+    return res
+
+
+def _dd_mesh(vertices, simplices):
+    """Helper for ``datashader.utils.mesh()``. Both arguments are assumed to be
+    Dask DataFrame objects.
+    """
+    # Construct mesh by indexing into vertices with simplex indices
+    # TODO: For dask: avoid .compute() calls
+    res = _pd_mesh(vertices.compute(), simplices.compute())
+
+    # Compute a chunksize that will not split the vertices of a single
+    # triangle across partitions
+    approx_npartitions = max(vertices.npartitions, simplices.npartitions)
+    chunksize = int(np.ceil(len(res) / (3*approx_npartitions)) * 3)
+
+    # Create dask dataframe
+    res = dd.from_pandas(res, chunksize=chunksize)
+    return res
+
+
+def mesh(vertices, simplices):
+    """Merge vertices and simplices into a triangular mesh, suitable to be
+    passed into the ``Canvas.trimesh()`` method via the ``mesh``
+    keyword-argument. Both arguments are assumed to be Dask DataFrame
+    objects.
+    """
+    # Verify the simplex data structure
+    assert simplices.values.shape[1] >= 3, ('At least three vertex columns '
+                                            'are required for the triangle '
+                                            'definition')
+    simplices_all_ints = simplices.dtypes.iloc[:3].map(
+        lambda dt: np.issubdtype(dt, np.integer)
+    ).all()
+    assert simplices_all_ints, ('Simplices must be integral. You may '
+                                'consider casting simplices to integers '
+                                'with ".astype(int)"')
+
+    assert len(vertices.columns) > 2 or simplices.values.shape[1] > 3, 'If no vertex weight column is provided, a triangle weight column is required.'
+
+
+    if isinstance(vertices, dd.DataFrame) and isinstance(simplices, dd.DataFrame):
+        return _dd_mesh(vertices, simplices)
+
+    return _pd_mesh(vertices, simplices)

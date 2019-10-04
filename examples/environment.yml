@@ -1,8 +1,6 @@
 name: ds
 channels:
- - bokeh
  - conda-forge
- - ioam
 
 dependencies:
  - attrs
@@ -20,9 +18,8 @@ dependencies:
  - distributed
  - fastparquet
  - flake8
- - gbrener::xarray>=0.9.6 # For xarray.open_rasterio()
  - geoviews
- - ioam::holoviews>=1.8.3
+ - pyviz/label/dev::holoviews>=1.11.2
  - ipython
  - iris
  - jupyter
@@ -49,6 +46,7 @@ dependencies:
  - snappy
  - statsmodels
  - tblib
+ - xarray
  - yaml
  - pip:
    - cachey

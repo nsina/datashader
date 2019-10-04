@@ -6,8 +6,7 @@ from datashape import coretypes as ct
 from toolz import concat, unique
 import xarray as xr
 
-from .core import Expr
-from .utils import ngjit
+from .utils import Expr, ngjit
 
 
 class Preprocess(Expr):
@@ -34,10 +33,12 @@ class category_codes(Preprocess):
 
 class Reduction(Expr):
     """Base class for per-bin reductions."""
-    def __init__(self, column):
+    def __init__(self, column=None):
         self.column = column
 
     def validate(self, in_dshape):
+        if not self.column in in_dshape.dict:
+            raise ValueError("specified column not found")
         if not isnumeric(in_dshape.measure[self.column]):
             raise ValueError("input must be numeric")
 
@@ -76,7 +77,7 @@ class OptionalFieldReduction(Reduction):
 
     @property
     def inputs(self):
-        return (extract(self.column),) if self.column else ()
+        return (extract(self.column),) if self.column is not None else ()
 
     def validate(self, in_dshape):
         pass
@@ -220,8 +221,9 @@ class m2(FloatingReduction):
 
     @staticmethod
     def _combine(Ms, sums, ns):
-        mu = np.nansum(sums, axis=0) / ns.sum(axis=0)
-        return np.nansum(Ms + ns*(sums/ns - mu)**2, axis=0)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            mu = np.nansum(sums, axis=0) / ns.sum(axis=0)
+            return np.nansum(Ms + ns*(sums/ns - mu)**2, axis=0)
 
 
 class min(FloatingReduction):
@@ -308,7 +310,9 @@ class count_cat(Reduction):
 
         def finalize(bases, **kwargs):
             dims = kwargs['dims'] + [self.column]
-            coords = kwargs['coords'] + [cats]
+
+            coords = kwargs['coords']
+            coords[self.column] = cats
             return xr.DataArray(bases[0], dims=dims, coords=coords)
         return finalize
 
@@ -382,6 +386,111 @@ class std(Reduction):
         return xr.DataArray(x, **kwargs)
 
 
+class first(Reduction):
+    """First value encountered in ``column``.
+
+    Useful for categorical data where an actual value must always be returned, 
+    not an average or other numerical calculation.
+    
+    Currently only supported for rasters, externally to this class.
+
+    Parameters
+    ----------
+    column : str
+        Name of the column to aggregate over. If the data type is floating point, 
+        ``NaN`` values in the column are skipped.
+    """
+    _dshape = dshape(Option(ct.float64))
+
+    @staticmethod 
+    def _append(x, y, agg):
+        raise NotImplementedError("first is currently implemented only for rasters")
+    
+    @staticmethod 
+    def _create(shape):
+        raise NotImplementedError("first is currently implemented only for rasters")
+
+    @staticmethod
+    def _combine(aggs):
+        raise NotImplementedError("first is currently implemented only for rasters")
+
+    @staticmethod
+    def _finalize(bases, **kwargs):
+        raise NotImplementedError("first is currently implemented only for rasters")
+
+
+
+class last(Reduction):
+    """Last value encountered in ``column``.
+
+    Useful for categorical data where an actual value must always be returned, 
+    not an average or other numerical calculation.
+    
+    Currently only supported for rasters, externally to this class.
+
+    Parameters
+    ----------
+    column : str
+        Name of the column to aggregate over. If the data type is floating point, 
+        ``NaN`` values in the column are skipped.
+    """
+    _dshape = dshape(Option(ct.float64))
+
+    @staticmethod 
+    def _append(x, y, agg):
+        raise NotImplementedError("last is currently implemented only for rasters")
+    
+    @staticmethod 
+    def _create(shape):
+        raise NotImplementedError("last is currently implemented only for rasters")
+
+    @staticmethod
+    def _combine(aggs):
+        raise NotImplementedError("last is currently implemented only for rasters")
+
+    @staticmethod
+    def _finalize(bases, **kwargs):
+        raise NotImplementedError("last is currently implemented only for rasters")
+
+
+
+class mode(Reduction):
+    """Mode (most common value) of all the values encountered in ``column``.
+
+    Useful for categorical data where an actual value must always be returned, 
+    not an average or other numerical calculation.
+    
+    Currently only supported for rasters, externally to this class.
+    Implementing it for other glyph types would be difficult due to potentially
+    unbounded data storage requirements to store indefinite point or line
+    data per pixel.
+
+    Parameters
+    ----------
+    column : str
+        Name of the column to aggregate over. If the data type is floating point, 
+        ``NaN`` values in the column are skipped.
+    """
+    _dshape = dshape(Option(ct.float64))
+
+    @staticmethod 
+    def _append(x, y, agg):
+        raise NotImplementedError("mode is currently implemented only for rasters")
+    
+    @staticmethod 
+    def _create(shape):
+        raise NotImplementedError("mode is currently implemented only for rasters")
+
+    @staticmethod
+    def _combine(aggs):
+        raise NotImplementedError("mode is currently implemented only for rasters")
+
+    @staticmethod
+    def _finalize(bases, **kwargs):
+        raise NotImplementedError("mode is currently implemented only for rasters")
+
+
+
 class summary(Expr):
     """A collection of named reductions.
 
@@ -415,3 +524,11 @@ class summary(Expr):
     @property
     def inputs(self):
         return tuple(unique(concat(v.inputs for v in self.values)))
+
+
+
+__all__ = list(set([_k for _k,_v in locals().items()
+                    if isinstance(_v,type) and (issubclass(_v,Reduction) or _v is summary)
+                    and _v not in [Reduction, OptionalFieldReduction,
+                                   FloatingReduction, m2]]))
+    

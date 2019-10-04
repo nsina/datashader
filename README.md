@@ -1,11 +1,19 @@
-Datashader
-----------
+<img src="https://github.com/pyviz/datashader/raw/master/doc/_static/logo_stacked.png" data-canonical-src="https://github.com/pyviz/datashader/raw/master/doc/_static/logo_stacked.png" width="200"/><br>
 
-[![Travis build Status](https://travis-ci.org/bokeh/datashader.svg?branch=master)](https://travis-ci.org/bokeh/datashader)
-[![Appveyor build status](https://ci.appveyor.com/api/projects/status/h3lwh6ju4hfcgkm8/branch/master?svg=true)](https://ci.appveyor.com/project/bokeh-integrations/datashader/branch/master)
-[![Documentation Status](https://readthedocs.org/projects/datashader/badge/?version=latest)](http://datashader.readthedocs.org/en/latest/?badge=latest)
-[![Task Status](https://badge.waffle.io/bokeh/datashader.png?label=ready&title=tasks)](https://waffle.io/bokeh/datashader)
+-----------------
 
+# Turn even the largest data into images, accurately
+
+|    |    |
+| --- | --- |
+| Build Status | [![Linux/MacOS Build Status](https://travis-ci.org/pyviz/datashader.svg?branch=master)](https://travis-ci.org/pyviz/datashader) [![Windows Build status](https://img.shields.io/appveyor/ci/pyviz/datashader/master.svg?logo=appveyor)](https://ci.appveyor.com/project/pyviz/datashader/branch/master) |
+| Coverage | [![codecov](https://codecov.io/gh/pyviz/datashader/branch/master/graph/badge.svg)](https://codecov.io/gh/pyviz/datashader) |
+| Latest dev release | [![Github tag](https://img.shields.io/github/tag/pyviz/datashader.svg?label=tag&colorB=11ccbb)](https://github.com/pyviz/datashader/tags) |
+| Latest release | [![Github release](https://img.shields.io/github/release/pyviz/datashader.svg?label=tag&colorB=11ccbb)](https://github.com/pyviz/datashader/releases) [![PyPI version](https://img.shields.io/pypi/v/datashader.svg?colorB=cc77dd)](https://pypi.python.org/pypi/datashader) [![datashader version](https://img.shields.io/conda/v/pyviz/datashader.svg?colorB=4488ff&style=flat)](https://anaconda.org/pyviz/datashader) [![conda-forge version](https://img.shields.io/conda/v/conda-forge/datashader.svg?label=conda%7Cconda-forge&colorB=4488ff)](https://anaconda.org/conda-forge/datashader) [![defaults version](https://img.shields.io/conda/v/anaconda/datashader.svg?label=conda%7Cdefaults&style=flat&colorB=4488ff)](https://anaconda.org/anaconda/datashader) |
+| Docs | [![site](https://img.shields.io/website-up-down-green-red/http/datashader.org.svg)](http://datashader.org) |
+
+
+## What is it?
 
 Datashader is a data rasterization pipeline for automating the process of
 creating meaningful representations of large amounts of data. Datashader
@@ -32,51 +40,85 @@ Datashader can be used on its own, but it is also designed to work as
 a pre-processing stage in a plotting library, allowing that library
 to work with much larger datasets than it would otherwise.
 
-
 ## Installation
 
-The best way to get started with Datashader is install it together
-with our extensive set of examples, following the instructions in the
-[examples README](/examples/README.md).
+Datashader supports Python 2.7, 3.6 and 3.7 on Linux, Windows, or
+Mac and can be installed with conda:
 
-If all you need is datashader itself, without any of the files used in
-the examples, you can install it from the `bokeh` channel using the using the
-[`conda` package manager](https://conda.io/docs/install/quick.html):
+    conda install datashader
 
-```bash
-conda install -c bokeh datashader
-```
+or with pip:
 
-If you want to get the very latest unreleased changes to datashader
-(e.g. to edit the source code yourself), first install using conda 
-as above to ensure the dependencies are installed, and you can
-then tell Python to use a git clone instead:
+    pip install datashader
 
-```bash
-conda remove --force datashader
-git clone https://github.com/bokeh/datashader.git
-cd datashader
-pip install -e .
-```
+For the best performance, we recommend using conda so that you are sure
+to get numerical libraries optimized for your platform. The latest
+releases are avalailable on the pyviz channel `conda install -c pyviz
+datashader` and the latest pre-release versions are avalailable on the
+dev-labelled channel `conda install -c pyviz/label/dev datashader`.
 
-Datashader is not currently available on PyPI, to avoid broken or
-low-performance installations that come from not keeping track of
-C/C++ binary dependencies such as LLVM (required by Numba).
+## Fetching Examples
 
-To run the test suite, first install pytest (e.g. ``conda install
-pytest``), then run ``py.test datashader`` in your datashader source
-directory.
+Once you've installed datashader as above you can fetch the examples:
+
+    datashader examples
+    cd datashader-examples
+
+This will create a new directory called
+<span class="title-ref">datashader-examples</span> with all the data
+needed to run the examples.
+
+To run all the examples you will need some extra dependencies. If you
+installed datashader **within a conda environment**, with that
+environment active run:
+
+    conda env update --file environment.yml
+
+Otherwise create a new environment:
+
+    conda env create --name datashader --file environment.yml
+    conda activate datashader
+
+## Developer Instructions
+
+1.  Install Python 3
+    [miniconda](https://docs.conda.io/en/latest/miniconda.html) or
+    [anaconda](https://www.anaconda.com/distribution/), if you don't
+    already have it on your system.
+
+2.  Clone the datashader git repository if you do not already have it:
+
+        git clone git://github.com/pyviz/datashader.git
+
+3.  Set up a new conda environment with all of the dependencies needed
+    to run the examples:
+
+        cd datashader
+        conda env create --name datashader --file ./examples/environment.yml
+        conda activate datashader
+
+4.  Put the datashader directory into the Python path in this
+    environment:
+
+        pip install -e .
 
 ## Learning more
 
 After working through the examples, you can find additional resources linked
-from the [datashader documentation](http://datashader.readthedocs.org),
+from the [datashader documentation](http://datashader.org),
 including API documentation and papers and talks about the approach.
 
-## Screenshots
+## Some Examples
 
-![USA census](docs/images/usa_census.jpg)
+![USA census](examples/assets/images/usa_census.jpg)
 
-![NYC races](docs/images/nyc_races.jpg)
+![NYC races](examples/assets/images/nyc_races.jpg)
 
-![NYC taxi](docs/images/nyc_pickups_vs_dropoffs.jpg)
+![NYC taxi](examples/assets/images/nyc_pickups_vs_dropoffs.jpg)
+
+
+## About PyViz
+
+Datashader is part of the PyViz initiative for making Python-based visualization tools work well together.
+See [pyviz.org](http://pyviz.org) for related packages that you can use with Datashader and
+[status.pyviz.org](http://status.pyviz.org) for the current status of each PyViz project.

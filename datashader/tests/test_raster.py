@@ -1,11 +1,16 @@
+from __future__ import absolute_import
 import pytest
 rasterio = pytest.importorskip("rasterio")
 
 from os import path
+from itertools import product
 
 import datashader as ds
 import xarray as xr
 import numpy as np
+import dask.array as da
+
+from datashader.resampling import compute_chunksize
 
 BASE_PATH = path.split(__file__)[0]
 DATA_PATH = path.abspath(path.join(BASE_PATH, 'data'))
@@ -313,6 +318,129 @@ def test_raster_float_nan_value_padding():
     assert agg.data.dtype.kind == 'f'
     assert np.allclose(agg.x.values, np.array([1/3., 1.0, 5/3.]))
     assert np.allclose(agg.y.values, np.array([1/3., 1.0, 5/3.]))
+
+
+def test_raster_single_pixel_range():
+    """
+    Ensure that canvas range covering a single pixel are handled correctly.
+    """
+
+    cvs = ds.Canvas(plot_height=3, plot_width=3, x_range=(0, 0.1), y_range=(0, 0.1))
+    array = np.array([[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]])
+    xr_array = xr.DataArray(array, dims=['y', 'x'],
+                            coords={'x': np.linspace(0, 1, 4),
+                                    'y': np.linspace(0, 1, 3)})
+
+    agg = cvs.raster(xr_array, downsample_method='max', nan_value=9999)
+    expected = np.array([[0, 0, 0], [0, 0, 0], [0, 0, 0]])
+
+    assert np.allclose(agg.data, expected)
+    assert agg.data.dtype.kind == 'i'
+    assert np.allclose(agg.x.values, np.array([1/60., 1/20., 1/12.]))
+    assert np.allclose(agg.y.values, np.array([1/60., 1/20., 1/12.]))
+
+
+
+def test_raster_single_pixel_range_with_padding():
+    """
+    Ensure that canvas range covering a single pixel and small area
+    beyond the defined data ranges is handled correctly.
+    """
+
+    cvs = ds.Canvas(plot_height=4, plot_width=4, x_range=(-0.5, 0.25), y_range=(-.5, 0.25))
+    array = np.array([[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]], dtype='f')
+    xr_array = xr.DataArray(array, dims=['y', 'x'],
+                            coords={'x': np.linspace(0, 1, 4),
+                                    'y': np.linspace(0, 1, 3)})
+
+    agg = cvs.raster(xr_array, downsample_method='max', nan_value=np.NaN)
+    expected = np.array([[np.NaN, np.NaN, np.NaN, np.NaN], [np.NaN, 0, 0, 0],
+                         [np.NaN, 0, 0, 0], [np.NaN, 0, 0, 0]])
+
+    assert np.allclose(agg.data, expected, equal_nan=True)
+    assert agg.data.dtype.kind == 'f'
+    assert np.allclose(agg.x.values, np.array([-0.40625, -0.21875, -0.03125,  0.15625]))
+    assert np.allclose(agg.y.values, np.array([-0.40625, -0.21875, -0.03125,  0.15625]))
+
+
+@pytest.mark.parametrize('in_size, out_size, agg', product(range(5, 8), range(2, 5), ['mean', 'min', 'max', 'first', 'last', 'var', 'std', 'mode']))
+def test_raster_distributed_downsample(in_size, out_size, agg):
+    """
+    Ensure that distributed regrid is equivalent to regular regrid.
+    """
+    cvs = ds.Canvas(plot_height=out_size, plot_width=out_size)
+
+    vs = np.linspace(-1, 1, in_size)
+    xs, ys = np.meshgrid(vs, vs)
+    arr = np.sin(xs*ys)
+
+    darr = da.from_array(arr, (2, 2))
+    coords = [('y', range(in_size)), ('x', range(in_size))]
+    xr_darr = xr.DataArray(darr, coords=coords, name='z')
+    xr_arr = xr.DataArray(arr, coords=coords, name='z')
+
+    agg_arr = cvs.raster(xr_arr, agg=agg)
+    agg_darr = cvs.raster(xr_darr, agg=agg)
+
+    assert np.allclose(agg_arr.data, agg_darr.data.compute())
+    assert np.allclose(agg_arr.x.values, agg_darr.x.values)
+    assert np.allclose(agg_arr.y.values, agg_darr.y.values)
+
+
+@pytest.mark.parametrize('in_size, out_size', product(range(2, 5), range(7, 9)))
+def test_raster_distributed_upsample(in_size, out_size):
+    """
+    Ensure that distributed regrid is equivalent to regular regrid.
+    """
+    cvs = ds.Canvas(plot_height=out_size, plot_width=out_size)
+
+    vs = np.linspace(-1, 1, in_size)
+    xs, ys = np.meshgrid(vs, vs)
+    arr = np.sin(xs*ys)
+
+    darr = da.from_array(arr, (2, 2))
+    coords = [('y', range(in_size)), ('x', range(in_size))]
+    xr_darr = xr.DataArray(darr, coords=coords, name='z')
+    xr_arr = xr.DataArray(arr, coords=coords, name='z')
+
+    agg_arr = cvs.raster(xr_arr, interpolate='nearest')
+    agg_darr = cvs.raster(xr_darr, interpolate='nearest')
+
+    assert np.allclose(agg_arr.data, agg_darr.data.compute())
+    assert np.allclose(agg_arr.x.values, agg_darr.x.values)
+    assert np.allclose(agg_arr.y.values, agg_darr.y.values)
+
+
+def test_raster_distributed_regrid_chunksize():
+    """
+    Ensure that distributed regrid respects explicit chunk size.
+    """
+    cvs = ds.Canvas(plot_height=2, plot_width=2)
+
+    size = 4
+    vs = np.linspace(-1, 1, size)
+    xs, ys = np.meshgrid(vs, vs)
+    arr = np.sin(xs*ys)
+
+    darr = da.from_array(arr, (2, 2))
+    xr_darr = xr.DataArray(darr, coords=[('y', range(size)), ('x', range(size))], name='z')
+
+    agg_darr = cvs.raster(xr_darr, chunksize=(1, 1))
+
+    assert agg_darr.data.chunksize == (1, 1)
+
+
+def test_resample_compute_chunksize():
+    """
+    Ensure chunksize computation is correct.
+    """
+    darr = da.from_array(np.zeros((100, 100)), (10, 10))
+
+    mem_limited_chunksize = compute_chunksize(darr, 10, 10, max_mem=2000)
+    assert mem_limited_chunksize == (2, 1)
+
+    explicit_chunksize = compute_chunksize(darr, 10, 10, chunksize=(5, 4))
+    assert explicit_chunksize == (5, 4)
 
 
 def test_resample_methods():

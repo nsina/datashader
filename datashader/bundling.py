@@ -35,7 +35,7 @@ def distance_between(a, b):
 
 @nb.jit
 def resample_segment(segments, new_segments, min_segment_length, max_segment_length, ndims):
-    next_point = np.array([0.0] * ndims)
+    next_point = np.zeros(ndims, dtype=segments.dtype)
     current_point = segments[0]
     pos = 0
     index = 1
@@ -122,7 +122,6 @@ def smooth_segment(segments, tension, idx, idy):
         current[idy] = ((1 - tension) * current[idy]) + (tension * (previous[idy] + next_point[idy]) / 2)
 
 
-@nb.jit
 def smooth(edge_segments, tension, idx, idy):
     for segments in edge_segments:
         smooth_segment(segments, tension, idx, idy)
@@ -184,9 +183,8 @@ def get_gradients(img):
 
 class BaseSegment(object):
     @classmethod
-    @nb.jit
     def create_delimiter(cls):
-        return np.array([[np.nan] * cls.ndims])
+        return np.full((1, cls.ndims), np.nan)
 
 
 class UnweightedSegment(BaseSegment):
@@ -324,7 +322,7 @@ def _convert_graph_to_edge_segments(nodes, edges, params):
     df = df.filter(items=segment_class.get_merged_columns(params))
 
     edge_segments = []
-    for edge in df.get_values():
+    for edge in df.values:
         edge_segments.append(segment_class.create_segment(edge))
     return edge_segments, segment_class
 
@@ -394,12 +392,11 @@ class connect_edges(param.ParameterizedFunction):
 
 directly_connect_edges = connect_edges # For bockwards compatibility; deprecated
 
-@nb.jit
+
 def minmax_normalize(X, lower, upper):
     return (X - lower) / (upper - lower)
 
 
-@nb.jit
 def minmax_denormalize(X, lower, upper):
     return X * (upper - lower) + lower
 

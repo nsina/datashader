@@ -1,6 +1,7 @@
 from __future__ import absolute_import, division, print_function
 
 from numbers import Number
+from math import log10
 
 import numpy as np
 import pandas as pd
@@ -10,7 +11,6 @@ from six import string_types
 from xarray import DataArray, Dataset
 from collections import OrderedDict
 
-from datashader.spatial.points import SpatialPointsFrame
 from .utils import Dispatcher, ngjit, calc_res, calc_bbox, orient_array, \
     compute_coords, dshape_from_xarray_dataset
 from .utils import get_indices, dshape_from_pandas, dshape_from_dask
@@ -18,6 +18,15 @@ from .utils import Expr # noqa (API import)
 from .resampling import resample_2d, resample_2d_distributed
 from . import reductions as rd
 
+try:
+    import cudf
+except Exception:
+    cudf = None
+
+try:
+    import dask_cudf
+except Exception:
+    dask_cudf = None
 
 class Axis(object):
     """Interface for implementing axis transformations.
@@ -106,7 +115,7 @@ class LogAxis(Axis):
     @staticmethod
     @ngjit
     def mapper(val):
-        return np.log10(val)
+        return log10(float(val))
 
     @staticmethod
     @ngjit
@@ -121,6 +130,18 @@ class LogAxis(Axis):
 
 
 _axis_lookup = {'linear': LinearAxis(), 'log': LogAxis()}
+
+
+def validate_xy_or_geometry(glyph, x, y, geometry):
+    if (geometry is None and (x is None or y is None) or
+            geometry is not None and (x is not None or y is not None)):
+        raise ValueError("""
+{glyph} coordinates may be specified by providing both the x and y arguments, or by
+providing the geometry argument. Received:
+    x: {x}
+    y: {y}
+    geometry: {geometry}
+""".format(glyph=glyph, x=repr(x), y=repr(y), geometry=repr(geometry)))
 
 
 class Canvas(object):
@@ -147,7 +168,7 @@ class Canvas(object):
         self.x_axis = _axis_lookup[x_axis_type]
         self.y_axis = _axis_lookup[y_axis_type]
 
-    def points(self, source, x, y, agg=None):
+    def points(self, source, x=None, y=None, agg=None, geometry=None):
         """Compute a reduction by pixel, mapping data to pixels as points.
 
         Parameters
@@ -155,26 +176,43 @@ class Canvas(object):
         source : pandas.DataFrame, dask.DataFrame, or xarray.DataArray/Dataset
             The input datasource.
         x, y : str
-            Column names for the x and y coordinates of each point.
+            Column names for the x and y coordinates of each point. If provided,
+            the geometry argument may not also be provided.
         agg : Reduction, optional
             Reduction to compute. Default is ``count()``.
+        geometry: str
+            Column name of a PointsArray of the coordinates of each point. If provided,
+            the x and y arguments may not also be provided.
         """
-        from .glyphs import Point
+        from .glyphs import Point, MultiPointGeometry
         from .reductions import count as count_rdn
+
+        validate_xy_or_geometry('Point', x, y, geometry)
+
         if agg is None:
             agg = count_rdn()
 
-        if (isinstance(source, SpatialPointsFrame) and
-                source.spatial is not None and
-                source.spatial.x == x and source.spatial.y == y and
-                self.x_range is not None and self.y_range is not None):
+        if geometry is None:
+            glyph = Point(x, y)
+        else:
+            from spatialpandas import GeoDataFrame
+            from spatialpandas.dask import DaskGeoDataFrame
+            if isinstance(source, DaskGeoDataFrame):
+                # Downselect partitions to those that may contain points in viewport
+                x_range = self.x_range if self.x_range is not None else (None, None)
+                y_range = self.y_range if self.y_range is not None else (None, None)
+                source = source.cx_partitions[slice(*x_range), slice(*y_range)]
+            elif not isinstance(source, GeoDataFrame):
+                raise ValueError(
+                    "source must be an instance of spatialpandas.GeoDataFrame or \n"
+                    "spatialpandas.dask.DaskGeoDataFrame.\n"
+                    "  Received value of type {typ}".format(typ=type(source)))
 
-            source = source.spatial_query(
-                x_range=self.x_range, y_range=self.y_range)
+            glyph = MultiPointGeometry(geometry)
 
-        return bypixel(source, self, Point(x, y), agg)
+        return bypixel(source, self, glyph, agg)
 
-    def line(self, source, x, y, agg=None, axis=0):
+    def line(self, source, x=None, y=None, agg=None, axis=0, geometry=None):
         """Compute a reduction by pixel, mapping data to pixels as one or
         more lines.
 
@@ -205,6 +243,9 @@ class Canvas(object):
                  all rows in source
             * 1: Draw one line per row in source using data from the
                  specified columns
+        geometry : str
+            Column name of a LinesArray of the coordinates of each line. If provided,
+            the x and y arguments may not also be provided.
 
         Examples
         --------
@@ -274,55 +315,74 @@ class Canvas(object):
         """
         from .glyphs import (LineAxis0, LinesAxis1, LinesAxis1XConstant,
                              LinesAxis1YConstant, LineAxis0Multi,
-                             LinesAxis1Ragged)
+                             LinesAxis1Ragged, LineAxis1Geometry)
         from .reductions import any as any_rdn
+
+        validate_xy_or_geometry('Line', x, y, geometry)
+
         if agg is None:
             agg = any_rdn()
 
-        # Broadcast column specifications to handle cases where
-        # x is a list and y is a string or vice versa
-        orig_x, orig_y = x, y
-        x, y = _broadcast_column_specifications(x, y)
+        if geometry is not None:
+            from spatialpandas import GeoDataFrame
+            from spatialpandas.dask import DaskGeoDataFrame
+            if isinstance(source, DaskGeoDataFrame):
+                # Downselect partitions to those that may contain lines in viewport
+                x_range = self.x_range if self.x_range is not None else (None, None)
+                y_range = self.y_range if self.y_range is not None else (None, None)
+                source = source.cx_partitions[slice(*x_range), slice(*y_range)]
+            elif not isinstance(source, GeoDataFrame):
+                raise ValueError(
+                    "source must be an instance of spatialpandas.GeoDataFrame or \n"
+                    "spatialpandas.dask.DaskGeoDataFrame.\n"
+                    "  Received value of type {typ}".format(typ=type(source)))
 
-        if axis == 0:
-            if (isinstance(x, (Number, string_types)) and
-                    isinstance(y, (Number, string_types))):
-                glyph = LineAxis0(x, y)
-            elif (isinstance(x, (list, tuple)) and
-                    isinstance(y, (list, tuple))):
-                glyph = LineAxis0Multi(tuple(x), tuple(y))
-            else:
-                raise ValueError("""
+            glyph = LineAxis1Geometry(geometry)
+        else:
+            # Broadcast column specifications to handle cases where
+            # x is a list and y is a string or vice versa
+            orig_x, orig_y = x, y
+            x, y = _broadcast_column_specifications(x, y)
+
+            if axis == 0:
+                if (isinstance(x, (Number, string_types)) and
+                        isinstance(y, (Number, string_types))):
+                    glyph = LineAxis0(x, y)
+                elif (isinstance(x, (list, tuple)) and
+                        isinstance(y, (list, tuple))):
+                    glyph = LineAxis0Multi(tuple(x), tuple(y))
+                else:
+                    raise ValueError("""
 Invalid combination of x and y arguments to Canvas.line when axis=0.
     Received:
         x: {x}
         y: {y}
 See docstring for more information on valid usage""".format(
-                    x=repr(orig_x), y=repr(orig_y)))
+                        x=repr(orig_x), y=repr(orig_y)))
 
-        elif axis == 1:
-            if isinstance(x, (list, tuple)) and isinstance(y, (list, tuple)):
-                glyph = LinesAxis1(tuple(x), tuple(y))
-            elif (isinstance(x, np.ndarray) and
-                  isinstance(y,  (list, tuple))):
-                glyph = LinesAxis1XConstant(x, tuple(y))
-            elif (isinstance(x, (list, tuple)) and
-                  isinstance(y, np.ndarray)):
-                glyph = LinesAxis1YConstant(tuple(x), y)
-            elif (isinstance(x, (Number, string_types)) and
-                    isinstance(y, (Number, string_types))):
-                glyph = LinesAxis1Ragged(x, y)
-            else:
-                raise ValueError("""
+            elif axis == 1:
+                if isinstance(x, (list, tuple)) and isinstance(y, (list, tuple)):
+                    glyph = LinesAxis1(tuple(x), tuple(y))
+                elif (isinstance(x, np.ndarray) and
+                      isinstance(y,  (list, tuple))):
+                    glyph = LinesAxis1XConstant(x, tuple(y))
+                elif (isinstance(x, (list, tuple)) and
+                      isinstance(y, np.ndarray)):
+                    glyph = LinesAxis1YConstant(tuple(x), y)
+                elif (isinstance(x, (Number, string_types)) and
+                        isinstance(y, (Number, string_types))):
+                    glyph = LinesAxis1Ragged(x, y)
+                else:
+                    raise ValueError("""
 Invalid combination of x and y arguments to Canvas.line when axis=1.
     Received:
         x: {x}
         y: {y}
 See docstring for more information on valid usage""".format(
-                    x=repr(orig_x), y=repr(orig_y)))
+                        x=repr(orig_x), y=repr(orig_y)))
 
-        else:
-            raise ValueError("""
+            else:
+                raise ValueError("""
 The axis argument to Canvas.line must be 0 or 1
     Received: {axis}""".format(axis=axis))
 
@@ -565,6 +625,72 @@ The axis argument to Canvas.line must be 0 or 1
 
         return bypixel(source, self, glyph, agg)
 
+    def polygons(self, source, geometry, agg=None):
+        """Compute a reduction by pixel, mapping data to pixels as one or
+        more filled polygons.
+
+        Parameters
+        ----------
+        source : xarray.DataArray or Dataset
+            The input datasource.
+        geometry : str
+            Column name of a PolygonsArray of the coordinates of each line.
+        agg : Reduction, optional
+            Reduction to compute. Default is ``any()``.
+
+        Returns
+        -------
+        data : xarray.DataArray
+
+        Examples
+        --------
+        >>> import datashader as ds  # doctest: +SKIP
+        ... import datashader.transfer_functions as tf
+        ... from spatialpandas.geometry import PolygonArray
+        ... from spatialpandas import GeoDataFrame
+        ... import pandas as pd
+        ...
+        ... polygons = PolygonArray([
+        ...     # First Element
+        ...     [[0, 0, 1, 0, 2, 2, -1, 4, 0, 0],  # Filled quadrilateral (CCW order)
+        ...      [0.5, 1,  1, 2,  1.5, 1.5,  0.5, 1],     # Triangular hole (CW order)
+        ...      [0, 2, 0, 2.5, 0.5, 2.5, 0.5, 2, 0, 2],  # Rectangular hole (CW order)
+        ...      [2.5, 3, 3.5, 3, 3.5, 4, 2.5, 3],  # Filled triangle
+        ...     ],
+        ...
+        ...     # Second Element
+        ...     [[3, 0, 3, 2, 4, 2, 4, 0, 3, 0],  # Filled rectangle (CCW order)
+        ...      # Rectangular hole (CW order)
+        ...      [3.25, 0.25, 3.75, 0.25, 3.75, 1.75, 3.25, 1.75, 3.25, 0.25],
+        ...     ]
+        ... ])
+        ...
+        ... df = GeoDataFrame({'polygons': polygons, 'v': range(len(polygons))})
+        ...
+        ... cvs = ds.Canvas()
+        ... agg = cvs.polygons(df, geometry='polygons', agg=ds.sum('v'))
+        ... tf.shade(agg)
+        """
+        from .glyphs import PolygonGeom
+        from .reductions import any as any_rdn
+        from spatialpandas import GeoDataFrame
+        from spatialpandas.dask import DaskGeoDataFrame
+        if isinstance(source, DaskGeoDataFrame):
+            # Downselect partitions to those that may contain polygons in viewport
+            x_range = self.x_range if self.x_range is not None else (None, None)
+            y_range = self.y_range if self.y_range is not None else (None, None)
+            source = source.cx_partitions[slice(*x_range), slice(*y_range)]
+        elif not isinstance(source, GeoDataFrame):
+            raise ValueError(
+                "source must be an instance of spatialpandas.GeoDataFrame or \n"
+                "spatialpandas.dask.DaskGeoDataFrame.\n"
+                "  Received value of type {typ}".format(typ=type(source)))
+
+        if agg is None:
+            agg = any_rdn()
+        glyph = PolygonGeom(geometry)
+        return bypixel(source, self, glyph, agg)
+
     def quadmesh(self, source, x=None, y=None, agg=None):
         """Samples a recti- or curvi-linear quadmesh by canvas size and bounds.
         Parameters
@@ -574,12 +700,13 @@ The axis argument to Canvas.line must be 0 or 1
         x, y : str
             Column names for the x and y coordinates of each point.
         agg : Reduction, optional
-            Reduction to compute. Default is ``mean()``.
+            Reduction to compute. Default is ``mean()``. Note that agg is ignored when
+            upsampling.
         Returns
         -------
         data : xarray.DataArray
         """
-        from .glyphs import QuadMeshRectilinear, QuadMeshCurvialinear
+        from .glyphs import QuadMeshRaster, QuadMeshRectilinear, QuadMeshCurvilinear
 
         # Determine reduction operation
         from .reductions import mean as mean_rnd
@@ -623,16 +750,46 @@ The axis argument to Canvas.line must be 0 or 1
                              (source.name, agg))
 
         if xarr.ndim == 1:
-            glyph = QuadMeshRectilinear(x, y, name)
+            xaxis_linear = self.x_axis is _axis_lookup["linear"]
+            yaxis_linear = self.y_axis is _axis_lookup["linear"]
+            even_yspacing = np.allclose(
+                yarr, np.linspace(yarr[0], yarr[-1], len(yarr))
+            )
+            even_xspacing = np.allclose(
+                xarr, np.linspace(xarr[0], xarr[-1], len(xarr))
+            )
+
+            if xaxis_linear and yaxis_linear and even_xspacing and even_yspacing:
+                # Source is a raster, where all x and y coordinates are evenly spaced
+                glyph = QuadMeshRaster(x, y, name)
+                upsample_width, upsample_height = glyph.is_upsample(
+                        source, x, y, name, self.x_range, self.y_range,
+                        self.plot_width, self.plot_height
+                )
+                if upsample_width and upsample_height:
+                    # Override aggregate with more efficient one for upsampling
+                    agg = rd._upsample(name)
+                    return bypixel(source, self, glyph, agg)
+                elif not upsample_width and not upsample_height:
+                    # Downsample both width and height
+                    return bypixel(source, self, glyph, agg)
+                else:
+                    # Mix of upsampling and downsampling
+                    # Use general rectilinear quadmesh implementation
+                    glyph = QuadMeshRectilinear(x, y, name)
+                    return bypixel(source, self, glyph, agg)
+            else:
+                # Source is a general rectilinear quadmesh
+                glyph = QuadMeshRectilinear(x, y, name)
+                return bypixel(source, self, glyph, agg)
         elif xarr.ndim == 2:
-            glyph = QuadMeshCurvialinear(x, y, name)
+            glyph = QuadMeshCurvilinear(x, y, name)
+            return bypixel(source, self, glyph, agg)
         else:
             raise ValueError("""\
 x- and y-coordinate arrays must have 1 or 2 dimensions.
     Received arrays with dimensions: {dims}""".format(
                 dims=list(xarr.dims)))
-
-        return bypixel(source, self, glyph, agg)
 
     # TODO re 'untested', below: Consider replacing with e.g. a 3x3
     # array in the call to Canvas (plot_height=3,plot_width=3), then
@@ -764,9 +921,14 @@ x- and y-coordinate arrays must have 1 or 2 dimensions.
             Optional nan_value which will be masked out when applying
             the resampling.
         agg : Reduction, optional default=mean()
-            Resampling mode when downsampling raster.
-            options include: first, last, mean, mode, var, std, min, max
-            Accepts an executable function, function object, or string name.
+            Resampling mode when downsampling raster. The supported
+            options include: first, last, mean, mode, var, std, min,
+            The agg can be specified as either a string name or as a
+            reduction function, but note that the function object will
+            be used only to extract the agg type (mean, max, etc.) and
+            the optional column name; the hardcoded raster code
+            supports only a fixed set of reductions and ignores the
+            actual code of the provided agg.
         interpolate : str, optional  default=linear
             Resampling mode when upsampling raster.
             options include: nearest, linear.
@@ -926,10 +1088,14 @@ x- and y-coordinate arrays must have 1 or 2 dimensions.
             bottom_pad = np.full(bshape, fill_value, source_window.dtype)
 
             concat = da.concatenate if isinstance(data, da.Array) else np.concatenate
-            if top_pad.shape[0] > 0:
-                data = concat((top_pad, data, bottom_pad), axis=0)
-            if left_pad.shape[1] > 0:
-                data = concat((left_pad, data, right_pad), axis=1)
+            arrays = (top_pad, data) if top_pad.shape[0] > 0 else (data,)
+            if bottom_pad.shape[0] > 0:
+                arrays += (bottom_pad,)
+            data = concat(arrays, axis=0) if len(arrays) > 1 else arrays[0]
+            arrays = (left_pad, data) if left_pad.shape[1] > 0 else (data,)
+            if right_pad.shape[1] > 0:
+                arrays += (right_pad,)
+            data = concat(arrays, axis=1) if len(arrays) > 1 else arrays[0]
 
         # Reorient array to original orientation
         if res[1] > 0: data = data[::-1]
@@ -992,7 +1158,8 @@ def bypixel(source, canvas, glyph, agg):
         source = source.drop([col for col in columns if col not in cols_to_keep])
         source = source.to_dask_dataframe()
 
-    if isinstance(source, pd.DataFrame):
+    if (isinstance(source, pd.DataFrame) or
+            (cudf and isinstance(source, cudf.DataFrame))):
         # Avoid datashape.Categorical instantiation bottleneck
         # by only retaining the necessary columns:
         # https://github.com/bokeh/datashader/issues/396
@@ -1028,6 +1195,10 @@ def _cols_to_keep(columns, glyph, agg):
         for subagg in agg.values:
             if subagg.column is not None:
                 cols_to_keep[subagg.column] = True
+    elif hasattr(agg, 'columns'):
+        for column in agg.columns:
+            if column is not None:
+                cols_to_keep[column] = True
     elif agg.column is not None:
         cols_to_keep[agg.column] = True
     return [col for col, keepit in cols_to_keep.items() if keepit]

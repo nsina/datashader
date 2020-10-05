@@ -7,18 +7,19 @@
 .. raw:: html
     :file: latest_news.html
 
-**Turns even the largest data into images, accurately**
+**Accurately render even the largest data**
 
 .. notebook:: datashader ../examples/index.ipynb
     :offset: 0
 
 .. toctree::
     :hidden:
-    :maxdepth: 2
+    :maxdepth: 3
 
     Introduction <self>
     Getting Started <getting_started/index>
     User Guide <user_guide/index>
+    Topics <topics/index>
     API <api>
     FAQ <FAQ>
     About <about>

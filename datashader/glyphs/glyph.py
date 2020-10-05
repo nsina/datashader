@@ -2,10 +2,26 @@ from __future__ import absolute_import, division
 import inspect
 import warnings
 import os
+from math import isnan
+
 import numpy as np
+import pandas as pd
 
 from datashader.utils import Expr, ngjit
 from datashader.macros import expand_varargs
+
+try:
+    import cudf
+except Exception:
+    cudf = None
+
+
+@ngjit
+def isnull(val):
+    """
+    Equivalent to isnan for floats, but also numba compatible with integers
+    """
+    return not (val <= 0 or val > 0)
 
 
 class Glyph(Expr):
@@ -35,30 +51,26 @@ class Glyph(Expr):
         return minval, maxval
 
     @staticmethod
+    def _compute_bounds(s):
+        if cudf and isinstance(s, cudf.Series):
+            s = s.nans_to_nulls()
+            return (s.min(), s.max())
+        elif isinstance(s, pd.Series):
+            return Glyph._compute_bounds_numba(s.values)
+        else:
+            return Glyph._compute_bounds_numba(s)
+
+    @staticmethod
     @ngjit
-    def _compute_x_bounds(xs):
+    def _compute_bounds_numba(arr):
         minval = np.inf
         maxval = -np.inf
-        for x in xs:
-            if not np.isnan(x):
+        for x in arr:
+            if not isnan(x):
                 if x < minval:
                     minval = x
                 if x > maxval:
                     maxval = x
-
-        return minval, maxval
-
-    @staticmethod
-    @ngjit
-    def _compute_y_bounds(ys):
-        minval = np.inf
-        maxval = -np.inf
-        for y in ys:
-            if not np.isnan(y):
-                if y < minval:
-                    minval = y
-                if y > maxval:
-                    maxval = y
 
         return minval, maxval
 
@@ -77,6 +89,15 @@ class Glyph(Expr):
                         maxval = v
 
         return minval, maxval
+
+    @staticmethod
+    def to_gpu_matrix(df, columns):
+        if not isinstance(columns, (list, tuple)):
+            return df[columns].to_gpu_array()
+        else:
+            return cudf.concat([
+                df[name].rename(str(i)) for i, name in enumerate(columns)
+            ], axis=1).as_gpu_matrix()
 
     def expand_aggs_and_cols(self, append):
         """

@@ -8,21 +8,34 @@ import PIL
 import pytest
 from collections import OrderedDict
 import datashader.transfer_functions as tf
-
+from datashader.tests.test_pandas import assert_eq_xr
 
 coords = OrderedDict([('x_axis', [3, 4, 5]), ('y_axis', [0, 1, 2])])
 dims = ['y_axis', 'x_axis']
 
-a = np.arange(10, 19, dtype='i4').reshape((3, 3))
-a[[0, 1, 2], [0, 1, 2]] = 0
-s_a = xr.DataArray(a, coords=coords, dims=dims)
-b = np.arange(10, 19, dtype='f4').reshape((3, 3))
-b[[0, 1, 2], [0, 1, 2]] = np.nan
-s_b = xr.DataArray(b, coords=coords, dims=dims)
-c = np.arange(10, 19, dtype='f8').reshape((3, 3))
-c[[0, 1, 2], [0, 1, 2]] = np.nan
-s_c = xr.DataArray(c, coords=coords, dims=dims)
-agg = xr.Dataset(dict(a=s_a, b=s_b, c=s_c))
+# CPU
+def build_agg(array_module=np):
+    a = array_module.arange(10, 19, dtype='u4').reshape((3, 3))
+    a[[0, 1, 2], [0, 1, 2]] = 0
+    s_a = xr.DataArray(a, coords=coords, dims=dims)
+    b = array_module.arange(10, 19, dtype='f4').reshape((3, 3))
+    b[[0, 1, 2], [0, 1, 2]] = array_module.nan
+    s_b = xr.DataArray(b, coords=coords, dims=dims)
+    c = array_module.arange(10, 19, dtype='f8').reshape((3, 3))
+    c[[0, 1, 2], [0, 1, 2]] = array_module.nan
+    s_c = xr.DataArray(c, coords=coords, dims=dims)
+    agg = xr.Dataset(dict(a=s_a, b=s_b, c=s_c))
+    return agg
+
+
+try:
+    import cupy
+    aggs = [build_agg(np), build_agg(cupy)]
+    arrays = [np.array, cupy.array]
+except ImportError:
+    cupy = None
+    aggs = [build_agg(np)]
+    arrays = [np.array]
 
 int_span = [11, 17]
 float_span = [11.0, 17.0]
@@ -42,8 +55,8 @@ solution_lists = {
          [4280361215, 4278190335, 0]]
 }
 
-solutions = {how: xr.DataArray(np.array(v, dtype='u4'),
-                               coords=coords, dims=dims)
+solutions = {how: tf.Image(np.array(v, dtype='u4'),
+                           coords=coords, dims=dims)
              for how, v in solution_lists.items()}
 
 eq_hist_sol = {'a': np.array([[0, 4291543295, 4288846335],
@@ -62,84 +75,86 @@ def check_span(x, cmap, how, sol):
 
     # All data no span
     img = tf.shade(x, cmap=cmap, how=how, span=None)
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
 
     # All data with span
     img = tf.shade(x, cmap=cmap, how=how, span=float_span)
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
 
     # Decrease smallest. This value should be clipped to span[0] and the
     # resulting image should be identical
     x[0, 1] = 10
     x_input = x.copy()
     img = tf.shade(x, cmap=cmap, how=how, span=float_span)
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
 
     # Check that clipping doesn't alter input array
-    assert x.equals(x_input)
+    x.equals(x_input)
 
     # Increase largest. This value should be clipped to span[1] and the
     # resulting image should be identical
     x[2, 1] = 18
     x_input = x.copy()
     img = tf.shade(x, cmap=cmap, how=how, span=float_span)
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
 
     # Check that clipping doesn't alter input array
-    assert x.equals(x_input)
+    x.equals(x_input)
 
     # zero out smallest. If span is working properly the zeroed out pixel
     # will be masked out and all other pixels will remain unchanged
-    x[0, 1] = 0 if x.dtype.kind == 'i' else np.nan
+    x[0, 1] = 0 if x.dtype.kind in ('i', 'u') else np.nan
     img = tf.shade(x, cmap=cmap, how=how, span=float_span)
     sol[0, 1] = sol[0, 0]
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
 
     # zero out the largest value
-    x[2, 1] = 0 if x.dtype.kind == 'i' else np.nan
+    x[2, 1] = 0 if x.dtype.kind in ('i', 'u') else np.nan
     img = tf.shade(x, cmap=cmap, how=how, span=float_span)
     sol[2, 1] = sol[0, 0]
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
 
 
+@pytest.mark.parametrize('agg', aggs)
 @pytest.mark.parametrize('attr', ['a', 'b', 'c'])
 @pytest.mark.parametrize('span', [None, int_span, float_span])
-def test_shade(attr, span):
+def test_shade(agg, attr, span):
     x = getattr(agg, attr)
     cmap = ['pink', 'red']
 
     img = tf.shade(x, cmap=cmap, how='log', span=span)
     sol = solutions['log']
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
     # Check dims/coordinates order
     assert list(img.coords) == ['x_axis', 'y_axis']
     assert list(img.dims) == ['y_axis', 'x_axis']
 
     img = tf.shade(x, cmap=cmap, how='cbrt', span=span)
     sol = solutions['cbrt']
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
 
     img = tf.shade(x, cmap=cmap, how='linear', span=span)
     sol = solutions['linear']
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
 
     # span option not supported with how='eq_hist'
     img = tf.shade(x, cmap=cmap, how='eq_hist')
-    sol = xr.DataArray(eq_hist_sol[attr], coords=coords, dims=dims)
-    assert img.equals(sol)
+    sol = tf.Image(eq_hist_sol[attr], coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
 
     img = tf.shade(x, cmap=cmap,
                    how=lambda x, mask: np.where(mask, np.nan, x ** 2))
     sol = np.array([[0, 4291543295, 4291148543],
                     [4290030335, 0, 4285557503],
                     [4282268415, 4278190335, 0]], dtype='u4')
-    sol = xr.DataArray(sol, coords=coords, dims=dims)
-    assert img.equals(sol)
+    sol = tf.Image(sol, coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
 
 
+@pytest.mark.parametrize('agg', aggs)
 @pytest.mark.parametrize('attr', ['a', 'b', 'c'])
 @pytest.mark.parametrize('how', ['linear', 'log', 'cbrt'])
-def test_span_cmap_list(attr, how):
+def test_span_cmap_list(agg, attr, how):
     # Get input
     x = getattr(agg, attr).copy()
 
@@ -153,8 +168,9 @@ def test_span_cmap_list(attr, how):
     check_span(x, cmap, how, sol)
 
 
+@pytest.mark.parametrize('agg', aggs)
 @pytest.mark.parametrize('cmap', ['black', (0, 0, 0), '#000000'])
-def test_span_cmap_single(cmap):
+def test_span_cmap_single(agg, cmap):
     # Get input
     x = agg.a
 
@@ -162,13 +178,14 @@ def test_span_cmap_single(cmap):
     sol = np.array([[0, 671088640, 1946157056],
                     [2701131776, 0, 3640655872],
                     [3976200192, 4278190080, 0]])
-    sol = xr.DataArray(sol, coords=coords, dims=dims)
+    sol = tf.Image(sol, coords=coords, dims=dims)
 
     # Check span
     check_span(x, cmap, 'log', sol)
 
 
-def test_span_cmap_mpl():
+@pytest.mark.parametrize('agg', aggs)
+def test_span_cmap_mpl(agg):
     # Get inputs
     x = agg.a
 
@@ -177,10 +194,10 @@ def test_span_cmap_mpl():
     cmap = cm.viridis
 
     # Build expected solution Data Array
-    sol = np.array([[5505348, 4283695428, 4287524142],
-                    [4287143710, 5505348, 4282832267],
-                    [4280213706, 4280608765, 5505348]])
-    sol = xr.DataArray(sol, coords=coords, dims=dims)
+    sol = np.array([[0, 4283695428, 4287524142],
+                    [4287143710, 0, 4282832267],
+                    [4280213706, 4280608765, 0]])
+    sol = tf.Image(sol, coords=coords, dims=dims)
 
     # Check span
     check_span(x, cmap, 'log', sol)
@@ -188,40 +205,43 @@ def test_span_cmap_mpl():
 
 def test_shade_bool():
     data = ~np.eye(3, dtype='bool')
-    x = xr.DataArray(data, coords=coords, dims=dims)
-    sol = xr.DataArray(np.where(data, 4278190335, 0).astype('uint32'),
+    x = tf.Image(data, coords=coords, dims=dims)
+    sol = tf.Image(np.where(data, 4278190335, 0).astype('uint32'),
                        coords=coords, dims=dims)
     img = tf.shade(x, cmap=['pink', 'red'], how='log')
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
     img = tf.shade(x, cmap=['pink', 'red'], how='cbrt')
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
     img = tf.shade(x, cmap=['pink', 'red'], how='linear')
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
     img = tf.shade(x, cmap=['pink', 'red'], how='eq_hist')
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
 
 
-def test_shade_cmap():
+@pytest.mark.parametrize('agg', aggs)
+def test_shade_cmap(agg):
     cmap = ['red', (0, 255, 0), '#0000FF']
     img = tf.shade(agg.a, how='log', cmap=cmap)
     sol = np.array([[0, 4278190335, 4278236489],
                     [4280344064, 0, 4289091584],
                     [4292225024, 4294901760, 0]])
-    sol = xr.DataArray(sol, coords=coords, dims=dims)
-    assert img.equals(sol)
+    sol = tf.Image(sol, coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
 
 
+@pytest.mark.parametrize('agg', aggs)
 @pytest.mark.parametrize('cmap', ['black', (0, 0, 0), '#000000'])
-def test_shade_cmap_non_categorical_alpha(cmap):
+def test_shade_cmap_non_categorical_alpha(agg, cmap):
     img = tf.shade(agg.a, how='log', cmap=cmap)
     sol = np.array([[         0,  671088640, 1946157056],
                     [2701131776,          0, 3640655872],
                     [3976200192, 4278190080,          0]])
-    sol = xr.DataArray(sol, coords=coords, dims=dims)
-    assert img.equals(sol)
+    sol = tf.Image(sol, coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
 
 
-def test_shade_cmap_errors():
+@pytest.mark.parametrize('agg', aggs)
+def test_shade_cmap_errors(agg):
     with pytest.raises(ValueError):
         tf.shade(agg.a, cmap='foo')
 
@@ -229,22 +249,24 @@ def test_shade_cmap_errors():
         tf.shade(agg.a, cmap=[])
 
 
-def test_shade_mpl_cmap():
+@pytest.mark.parametrize('agg', aggs)
+def test_shade_mpl_cmap(agg):
     cm = pytest.importorskip('matplotlib.cm')
     img = tf.shade(agg.a, how='log', cmap=cm.viridis)
-    sol = np.array([[5505348, 4283695428, 4287524142],
-                    [4287143710, 5505348, 4282832267],
-                    [4280213706, 4280608765, 5505348]])
-    sol = xr.DataArray(sol, coords=coords, dims=dims)
-    assert img.equals(sol)
+    sol = np.array([[0, 4283695428, 4287524142],
+                    [4287143710, 0, 4282832267],
+                    [4280213706, 4280608765, 0]])
+    sol = tf.Image(sol, coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
 
 
-def test_shade_category():
+@pytest.mark.parametrize('array', arrays)
+def test_shade_category(array):
     coords = [np.array([0, 1]), np.array([2, 5])]
-    cat_agg = xr.DataArray(np.array([[(0, 12, 0), (3, 0, 3)],
-                                    [(12, 12, 12), (24, 0, 0)]]),
-                           coords=(coords + [['a', 'b', 'c']]),
-                           dims=(dims + ['cats']))
+    cat_agg = tf.Image(array([[(0, 12, 0), (3, 0, 3)],
+                              [(12, 12, 12), (24, 0, 0)]], dtype='u4'),
+                       coords=(coords + [['a', 'b', 'c']]),
+                       dims=(dims + ['cats']))
 
     colors = [(255, 0, 0), '#0000FF', 'orange']
 
@@ -252,7 +274,7 @@ def test_shade_category():
     sol = np.array([[2583625728, 335565567],
                     [4283774890, 3707764991]], dtype='u4')
     sol = tf.Image(sol, coords=coords, dims=dims)
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
     # Check dims/coordinates order
     assert list(img.coords) == ['x_axis', 'y_axis']
     assert list(img.dims) == ['y_axis', 'x_axis']
@@ -263,13 +285,13 @@ def test_shade_category():
     sol = np.array([[2650734592, 335565567],
                     [4283774890, 3657433343]], dtype='u4')
     sol = tf.Image(sol, coords=coords, dims=dims)
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
 
     img = tf.shade(cat_agg, color_key=colors, how='linear', min_alpha=20)
     sol = np.array([[1140785152, 335565567],
                     [4283774890, 2701132031]], dtype='u4')
     sol = tf.Image(sol, coords=coords, dims=dims)
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
 
     img = tf.shade(cat_agg, color_key=colors,
                    how=lambda x, m: np.where(m, np.nan, x) ** 2,
@@ -277,7 +299,169 @@ def test_shade_category():
     sol = np.array([[503250944, 335565567],
                     [4283774890, 1744830719]], dtype='u4')
     sol = tf.Image(sol, coords=coords, dims=dims)
-    assert img.equals(sol)
+    assert_eq_xr(img, sol)
+
+    # all pixels should be at min_alpha
+    img = tf.shade(cat_agg, color_key=colors, how='linear', min_alpha=0, span=(50, 100))
+    sol = np.array([[16711680, 21247],
+                    [5584810, 255]], dtype='u4')
+    sol = tf.Image(sol, coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
+    # redundant verification that alpha channel is all 0x00
+    assert ((img.data[0,0] >> 24) & 0xFF) == 0
+    assert ((img.data[0,1] >> 24) & 0xFF) == 0
+    assert ((img.data[1,0] >> 24) & 0xFF) == 0
+    assert ((img.data[1,1] >> 24) & 0xFF) == 0
+
+    # all pixels should be at max_alpha
+    img = tf.shade(cat_agg, color_key=colors, how='linear', min_alpha=0, span=(0, 2))
+    sol = np.array([[4294901760, 4278211327],
+                    [4283774890, 4278190335]], dtype='u4')
+    sol = tf.Image(sol, coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
+    # redundant verification that alpha channel is all 0xFF
+    assert ((img.data[0,0] >> 24) & 0xFF) == 255
+    assert ((img.data[0,1] >> 24) & 0xFF) == 255
+    assert ((img.data[1,0] >> 24) & 0xFF) == 255
+    assert ((img.data[1,1] >> 24) & 0xFF) == 255
+
+    # One pixel should be min-alpha, the other max-alpha
+    img = tf.shade(cat_agg, color_key=colors, how='linear', min_alpha=0, span=(6, 36))
+    sol = np.array([[872349696, 21247],
+                    [4283774890, 2566914303]], dtype='u4')
+    sol = tf.Image(sol, coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
+    # redundant verification that alpha channel is correct
+    assert ((img.data[0,0] >> 24) & 0xFF) == 51 # (6 / 30) * 255
+    assert ((img.data[0,1] >> 24) & 0xFF) == 0
+    assert ((img.data[1,0] >> 24) & 0xFF) == 255
+    assert ((img.data[1,1] >> 24) & 0xFF) == 153 # ( 18 /30) * 255
+
+    # One pixel should be min-alpha, the other max-alpha
+    img = tf.shade(cat_agg, color_key=colors, how='linear', min_alpha=0, span=(0, 72))
+    sol = np.array([[721354752, 352342783],
+                    [2136291242, 1426063615]], dtype='u4')
+    sol = tf.Image(sol, coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
+    # redundant verification that alpha channel is correct
+    assert ((img.data[0,0] >> 24) & 0xFF) == 42 # (12 / 72) * 255
+    assert ((img.data[0,1] >> 24) & 0xFF) == 21 # (6 / 72) * 255
+    assert ((img.data[1,0] >> 24) & 0xFF) == 127 # ( 36 / 72) * 255
+    assert ((img.data[1,1] >> 24) & 0xFF) == 85 # ( 24 /72 ) * 255
+
+    # test that empty coordinates are always fully transparent, even when
+    # min_alpha is non-zero
+    cat_agg = tf.Image(array([[(0, 0, 0), (3, 0, 3)],
+                              [(12, 12, 12), (24, 0, 0)]], dtype='u4'),
+                           coords=(coords + [['a', 'b', 'c']]),
+                           dims=(dims + ['cats']))
+
+    # First test auto-span
+    img = tf.shade(cat_agg, color_key=colors, how='linear', min_alpha=20)
+    sol = np.array([[5584810, 335565567],
+                    [4283774890, 2701132031]], dtype='u4')
+    sol = tf.Image(sol, coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
+
+    # redundant verification that alpha channel is correct
+    assert ((img.data[0,0] >> 24) & 0xFF) == 0 # fully transparent
+    assert ((img.data[0,1] >> 24) & 0xFF) != 0 # not fully transparent
+    assert ((img.data[1,0] >> 24) & 0xFF) != 0 # not fully transparent
+    assert ((img.data[1,1] >> 24) & 0xFF) != 0 # not fully transparent
+
+    # Next test manual-span
+    img = tf.shade(cat_agg, color_key=colors, how='linear', min_alpha=20, span=(6, 36))
+    sol = np.array([[5584810, 335565567],
+                    [4283774890, 2701132031]], dtype='u4')
+    sol = tf.Image(sol, coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
+
+    # redundant verification that alpha channel is correct
+    assert ((img.data[0,0] >> 24) & 0xFF) == 0 # fully transparent
+    assert ((img.data[0,1] >> 24) & 0xFF) != 0 # not fully transparent
+    assert ((img.data[1,0] >> 24) & 0xFF) != 0 # not fully transparent
+    assert ((img.data[1,1] >> 24) & 0xFF) != 0 # not fully transparent
+
+
+    # Categorical aggregations with some reductions (such as sum) can result in negative
+    # values in the data here we test positive and negative values
+    cat_agg = tf.Image(array([[(0, -30, 0), (18, 0, -18)],
+                              [(-2, 2, -2), (-18, 9, 12)]], dtype='i4'),
+                       coords=(coords + [['a', 'b', 'c']]),
+                       dims=(dims + ['cats']))
+
+    img = tf.shade(cat_agg, color_key=colors, how='linear', min_alpha=20)
+    sol = np.array([[335565567, 3914667690],
+                    [3680253090, 4285155988]], dtype='u4')
+    sol = tf.Image(sol, coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
+    assert ((img.data[0,0] >> 24) & 0xFF) == 20
+    assert ((img.data[0,1] >> 24) & 0xFF) == 233
+    assert ((img.data[1,0] >> 24) & 0xFF) == 219
+    assert ((img.data[1,1] >> 24) & 0xFF) == 255
+
+    img = tf.shade(cat_agg, color_key=colors, how='linear', min_alpha=20, span=(0, 3))
+    sol = np.array([[335565567, 341120682],
+                    [341587106, 4285155988]], dtype='u4')
+    sol = tf.Image(sol, coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
+    assert ((img.data[0,0] >> 24) & 0xFF) == 20 # min alpha
+    assert ((img.data[0,1] >> 24) & 0xFF) == 20 # min alpha
+    assert ((img.data[1,0] >> 24) & 0xFF) == 20 # min alpha
+    assert ((img.data[1,1] >> 24) & 0xFF) == 255
+
+    img = tf.shade(cat_agg, color_key=colors, how='linear', min_alpha=20, color_baseline=9)
+    sol = np.array([[341129130, 3909091583],
+                    [3679795114, 4278232575]], dtype='u4')
+    sol = tf.Image(sol, coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
+    assert ((img.data[0,0] >> 24) & 0xFF) == 20
+    assert ((img.data[0,1] >> 24) & 0xFF) == 233
+    assert ((img.data[1,0] >> 24) & 0xFF) == 219
+    assert ((img.data[1,1] >> 24) & 0xFF) == 255
+
+    # Categorical aggregations with some reductions (such as sum) can result in negative
+    # values in the data, here we test all negative values
+    cat_agg = tf.Image(array([[(0, -30, 0), (-18, 0, -18)],
+                              [(-2, -2, -2), (-18, 0, 0)]], dtype='i4'),
+                       coords=(coords + [['a', 'b', 'c']]),
+                       dims=(dims + ['cats']))
+
+    img = tf.shade(cat_agg, color_key=colors, how='linear', min_alpha=20)
+    sol = np.array([[1124094719, 344794225],
+                    [4283774890, 2708096148]], dtype='u4')
+    sol = tf.Image(sol, coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
+    assert ((img.data[0,0] >> 24) & 0xFF) == 67
+    assert ((img.data[0,1] >> 24) & 0xFF) == 20
+    assert ((img.data[1,0] >> 24) & 0xFF) == 255
+    assert ((img.data[1,1] >> 24) & 0xFF) == 161
+
+    img = tf.shade(cat_agg, color_key=colors, how='linear', min_alpha=20, span=(6, 36))
+    sol = np.array([[335565567, 344794225],
+                    [341129130, 342508692]], dtype='u4')
+    sol = tf.Image(sol, coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
+    assert ((img.data[0,0] >> 24) & 0xFF) == 20 # min alpha
+    assert ((img.data[0,1] >> 24) & 0xFF) == 20 # min alpha
+    assert ((img.data[1,0] >> 24) & 0xFF) == 20 # min alpha
+    assert ((img.data[1,1] >> 24) & 0xFF) == 20 # min alpha
+
+@pytest.mark.parametrize('array', arrays)
+def test_shade_zeros(array):
+    coords = [np.array([0, 1]), np.array([2, 5])]
+    cat_agg = tf.Image(array([[(0, 0, 0), (0, 0, 0)],
+                              [(0, 0, 0), (0, 0, 0)]], dtype='u4'),
+                           coords=(coords + [['a', 'b', 'c']]),
+                           dims=(dims + ['cats']))
+
+    colors = [(255, 0, 0), '#0000FF', 'orange']
+
+    img = tf.shade(cat_agg, color_key=colors, how='linear', min_alpha=0)
+    sol = np.array([[5584810, 5584810],
+                    [5584810, 5584810]], dtype='u4')
+    sol = tf.Image(sol, coords=coords, dims=dims)
+    assert_eq_xr(img, sol)
 
 
 coords2 = [np.array([0, 2]), np.array([3, 5])]
@@ -343,7 +527,7 @@ def test_masks():
     np.testing.assert_equal(tf._circle_mask(3), out)
 
 
-def test_spread():
+def test_rgb_spread():
     p = 0x7d00007d
     g = 0x7d00FF00
     b = 0x7dFF0000
@@ -409,19 +593,338 @@ def test_spread():
     pytest.raises(ValueError, lambda: tf.spread(img, mask=np.ones((2, 2))))
 
 
-def test_density():
+def test_uint32_spread():
+    data = np.array([[1, 1, 0, 0, 0],
+                     [1, 2, 0, 0, 0],
+                     [0, 0, 0, 0, 0],
+                     [0, 0, 0, 3, 0],
+                     [0, 0, 0, 0, 0]], dtype='uint32')
+    coords = [np.arange(5), np.arange(5)]
+    arr = xr.DataArray(data, coords=coords, dims=dims)
+
+    s = tf.spread(arr)
+    o = np.array([[5, 5, 3, 0, 0],
+                  [5, 5, 3, 0, 0],
+                  [3, 3, 5, 3, 3],
+                  [0, 0, 3, 3, 3],
+                  [0, 0, 3, 3, 3]])
+    np.testing.assert_equal(s.data, o)
+    assert (s.x_axis == arr.x_axis).all()
+    assert (s.y_axis == arr.y_axis).all()
+    assert s.dims == arr.dims
+
+    s = tf.spread(arr, px=2)
+    o = np.array([[5, 5, 5, 3, 0],
+                  [5, 5, 8, 6, 3],
+                  [5, 8, 7, 5, 3],
+                  [3, 6, 5, 3, 3],
+                  [0, 3, 3, 3, 3]])
+    np.testing.assert_equal(s.data, o)
+
+    s = tf.spread(arr, shape='square')
+    o = np.array([[5, 5, 3, 0, 0],
+                  [5, 5, 3, 0, 0],
+                  [3, 3, 5, 3, 3],
+                  [0, 0, 3, 3, 3],
+                  [0, 0, 3, 3, 3]])
+
+    np.testing.assert_equal(s.data, o)
+
+    s = tf.spread(arr, how='min')
+    o = np.array([[1, 1, 1, 0, 0],
+                  [1, 1, 1, 0, 0],
+                  [1, 1, 2, 3, 3],
+                  [0, 0, 3, 3, 3],
+                  [0, 0, 3, 3, 3]])
+    np.testing.assert_equal(s.data, o)
+
+    s = tf.spread(arr, how='max')
+
+    o = np.array([[2, 2, 2, 0, 0],
+                  [2, 2, 2, 0, 0],
+                  [2, 2, 3, 3, 3],
+                  [0, 0, 3, 3, 3],
+                  [0, 0, 3, 3, 3]])
+    np.testing.assert_equal(s.data, o)
+
+
+    mask = np.array([[1, 0, 1],
+                     [0, 1, 0],
+                     [1, 0, 1]])
+
+    data = np.array([[0, 0, 0, 1, 0],
+                     [0, 0, 0, 0, 0],
+                     [0, 1, 0, 0, 0],
+                     [0, 0, 0, 0, 0],
+                     [0, 0, 0, 0, 0]], dtype='uint32')
+    arr = xr.DataArray(data, coords=coords, dims=dims)
+    s = tf.spread(arr, mask=mask)
+
+    o = np.array([[0, 0, 0, 1, 0],
+                  [1, 0, 2, 0, 1],
+                  [0, 1, 0, 0, 0],
+                  [1, 0, 1, 0, 0],
+                  [0, 0, 0, 0, 0]])
+    np.testing.assert_equal(s.data, o)
+
+    s = tf.spread(arr, px=0)
+    np.testing.assert_equal(s.data, arr.data)
+
+    pytest.raises(ValueError, lambda: tf.spread(arr, px=-1))
+    pytest.raises(ValueError, lambda: tf.spread(arr, mask=np.ones(2)))
+    pytest.raises(ValueError, lambda: tf.spread(arr, mask=np.ones((2, 2))))
+
+
+def test_int32_spread():
+    data = np.array([[1, 1, 0, 0, 0],
+                     [1, 2, 0, 0, 0],
+                     [0, 0, 0, 0, 0],
+                     [0, 0, 0, 3, 0],
+                     [0, 0, 0, 0, 0]], dtype='int32')
+    coords = [np.arange(5), np.arange(5)]
+    arr = xr.DataArray(data, coords=coords, dims=dims)
+
+    s = tf.spread(arr)
+    o = np.array([[5, 5, 3, 0, 0],
+                  [5, 5, 3, 0, 0],
+                  [3, 3, 5, 3, 3],
+                  [0, 0, 3, 3, 3],
+                  [0, 0, 3, 3, 3]])
+    np.testing.assert_equal(s.data, o)
+    assert (s.x_axis == arr.x_axis).all()
+    assert (s.y_axis == arr.y_axis).all()
+    assert s.dims == arr.dims
+
+    s = tf.spread(arr, px=2)
+    o = np.array([[5, 5, 5, 3, 0],
+                  [5, 5, 8, 6, 3],
+                  [5, 8, 7, 5, 3],
+                  [3, 6, 5, 3, 3],
+                  [0, 3, 3, 3, 3]])
+    np.testing.assert_equal(s.data, o)
+
+    s = tf.spread(arr, shape='square')
+    o = np.array([[5, 5, 3, 0, 0],
+                  [5, 5, 3, 0, 0],
+                  [3, 3, 5, 3, 3],
+                  [0, 0, 3, 3, 3],
+                  [0, 0, 3, 3, 3]])
+
+    np.testing.assert_equal(s.data, o)
+
+    s = tf.spread(arr, how='min')
+    o = np.array([[0, 0, 0, 0, 0],
+                  [0, 0, 0, 0, 0],
+                  [0, 0, 0, 0, 0],
+                  [0, 0, 0, 0, 0],
+                  [0, 0, 0, 0, 0]])
+    np.testing.assert_equal(s.data, o)
+
+    s = tf.spread(arr, how='max')
+
+    o = np.array([[2, 2, 2, 0, 0],
+                  [2, 2, 2, 0, 0],
+                  [2, 2, 3, 3, 3],
+                  [0, 0, 3, 3, 3],
+                  [0, 0, 3, 3, 3]])
+    np.testing.assert_equal(s.data, o)
+
+
+    mask = np.array([[1, 0, 1],
+                     [0, 1, 0],
+                     [1, 0, 1]])
+
+    data = np.array([[0, 0, 0, 1, 0],
+                     [0, 0, 0, 0, 0],
+                     [0, 1, 0, 0, 0],
+                     [0, 0, 0, 0, 0],
+                     [0, 0, 0, 0, 0]], dtype='int32')
+    arr = xr.DataArray(data, coords=coords, dims=dims)
+    s = tf.spread(arr, mask=mask)
+
+    o = np.array([[0, 0, 0, 1, 0],
+                  [1, 0, 2, 0, 1],
+                  [0, 1, 0, 0, 0],
+                  [1, 0, 1, 0, 0],
+                  [0, 0, 0, 0, 0]])
+    np.testing.assert_equal(s.data, o)
+
+    s = tf.spread(arr, px=0)
+    np.testing.assert_equal(s.data, arr.data)
+
+    pytest.raises(ValueError, lambda: tf.spread(arr, px=-1))
+    pytest.raises(ValueError, lambda: tf.spread(arr, mask=np.ones(2)))
+    pytest.raises(ValueError, lambda: tf.spread(arr, mask=np.ones((2, 2))))
+
+
+def test_float32_spread():
+    data = np.array([[1, 1, np.nan, np.nan, np.nan],
+                     [1, 2, np.nan, np.nan, np.nan],
+                     [np.nan, np.nan, np.nan, np.nan, np.nan],
+                     [np.nan, np.nan, np.nan, 3, np.nan],
+                     [np.nan, np.nan, np.nan, np.nan, np.nan]], dtype='float32')
+    coords = [np.arange(5), np.arange(5)]
+    arr = xr.DataArray(data, coords=coords, dims=dims)
+
+    s = tf.spread(arr)
+    o = np.array([[5, 5, 3, np.nan, np.nan],
+                  [5, 5, 3, np.nan, np.nan],
+                  [3, 3, 5, 3, 3],
+                  [np.nan, np.nan, 3, 3, 3],
+                  [np.nan, np.nan, 3, 3, 3]])
+    np.testing.assert_equal(s.data, o)
+    assert (s.x_axis == arr.x_axis).all()
+    assert (s.y_axis == arr.y_axis).all()
+    assert s.dims == arr.dims
+
+    s = tf.spread(arr, px=2)
+    o = np.array([[5, 5, 5, 3, np.nan],
+                  [5, 5, 8, 6, 3],
+                  [5, 8, 7, 5, 3],
+                  [3, 6, 5, 3, 3],
+                  [np.nan, 3, 3, 3, 3]])
+    np.testing.assert_equal(s.data, o)
+
+    s = tf.spread(arr, shape='square')
+    o = np.array([[5, 5, 3, np.nan, np.nan],
+                  [5, 5, 3, np.nan, np.nan],
+                  [3, 3, 5, 3, 3],
+                  [np.nan, np.nan, 3, 3, 3],
+                  [np.nan, np.nan, 3, 3, 3]])
+
+    np.testing.assert_equal(s.data, o)
+
+    s = tf.spread(arr, how='min')
+    o = np.array([[1, 1, 1, np.nan, np.nan],
+                  [1, 1, 1, np.nan, np.nan],
+                  [1, 1, 2, 3, 3],
+                  [np.nan, np.nan, 3, 3, 3],
+                  [np.nan, np.nan, 3, 3, 3]])
+    np.testing.assert_equal(s.data, o)
+
+    s = tf.spread(arr, how='max')
+
+    o = np.array([[2, 2, 2, np.nan, np.nan],
+                  [2, 2, 2, np.nan, np.nan],
+                  [2, 2, 3, 3, 3],
+                  [np.nan, np.nan, 3, 3, 3],
+                  [np.nan, np.nan, 3, 3, 3]])
+    np.testing.assert_equal(s.data, o)
+
+
+    mask = np.array([[1, 0, 1],
+                     [0, 1, 0],
+                     [1, 0, 1]])
+    data = np.array([[np.nan, np.nan, np.nan, 1, np.nan],
+                     [np.nan, np.nan, np.nan, np.nan, np.nan],
+                     [np.nan, 1, np.nan, np.nan, np.nan],
+                     [np.nan, np.nan, np.nan, np.nan, np.nan],
+                     [np.nan, np.nan, np.nan, np.nan, np.nan]], dtype='float32')
+    arr = xr.DataArray(data, coords=coords, dims=dims)
+    s = tf.spread(arr, mask=mask)
+
+
+    o = np.array([[0, 0, 0, 1, 0],
+                  [1, 0, 2, 0, 1],
+                  [0, 1, 0, 0, 0],
+                  [1, 0, 1, 0, 0],
+                  [0, 0, 0, 0, 0]])
+
+    o = np.array([[np.nan, np.nan, np.nan, 1, np.nan],
+                  [1, np.nan, 2, np.nan, 1],
+                  [np.nan, 1, np.nan, np.nan, np.nan],
+                  [1, np.nan, 1, np.nan, np.nan],
+                  [np.nan, np.nan, np.nan, np.nan, np.nan]])
+    np.testing.assert_equal(s.data, o)
+
+    s = tf.spread(arr, px=0)
+    np.testing.assert_equal(s.data, arr.data)
+
+    pytest.raises(ValueError, lambda: tf.spread(arr, px=-1))
+    pytest.raises(ValueError, lambda: tf.spread(arr, mask=np.ones(2)))
+    pytest.raises(ValueError, lambda: tf.spread(arr, mask=np.ones((2, 2))))
+
+
+def test_categorical_spread():
+    a_data = np.array([[0, 1, 0, 0, 0],
+                       [0, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 0]], dtype='int32')
+
+    b_data = np.array([[0, 0, 0, 0, 0],
+                       [0, 2, 0, 0, 0],
+                       [0, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 0]], dtype='int32')
+
+    c_data = np.array([[0, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 0],
+                       [0, 0, 0, 3, 0],
+                       [0, 0, 0, 0, 0]], dtype='int32')
+
+    data = np.dstack([a_data, b_data, c_data])
+    coords = [np.arange(5), np.arange(5)]
+    arr = xr.DataArray(data, coords=coords + [['a', 'b', 'c']],
+                       dims=dims + ['cat'])
+
+    s = tf.spread(arr)
+    o = np.array([[1, 1, 1, 0, 0],
+                  [1, 1, 1, 0, 0],
+                  [0, 0, 0, 0, 0],
+                  [0, 0, 0, 0, 0],
+                  [0, 0, 0, 0, 0]])
+    np.testing.assert_equal(s.sel(cat='a').data, o)
+
+    o = np.array([[2, 2, 2, 0, 0],
+                  [2, 2, 2, 0, 0],
+                  [2, 2, 2, 0, 0],
+                  [0, 0, 0, 0, 0],
+                  [0, 0, 0, 0, 0]])
+    np.testing.assert_equal(s.sel(cat='b').data, o)
+
+    o = np.array([[0, 0, 0, 0, 0],
+                  [0, 0, 0, 0, 0],
+                  [0, 0, 3, 3, 3],
+                  [0, 0, 3, 3, 3],
+                  [0, 0, 3, 3, 3]])
+    np.testing.assert_equal(s.sel(cat='c').data, o)
+
+
+def test_rgb_density():
     b = 0xffff0000
     data = np.full((4, 4), b, dtype='uint32')
-    assert tf._density(data) == 1.0
+    assert tf._rgb_density(data) == 1.0
     data = np.zeros((4, 4), dtype='uint32')
-    assert tf._density(data) == np.inf
+    assert tf._rgb_density(data) == np.inf
     data[2, 2] = b
-    assert tf._density(data) == 0
+    assert tf._rgb_density(data) == 0
     data[2, 1] = data[1, 2] = data[1, 1] = b
-    assert np.allclose(tf._density(data), 3./8.)
+    assert np.allclose(tf._rgb_density(data), 3./8.)
+
+def test_int_array_density():
+    data = np.ones((4, 4), dtype='uint32')
+    assert tf._array_density(data, float_type=False) == 1.0
+    data = np.zeros((4, 4), dtype='uint32')
+    assert tf._array_density(data, float_type=False) == np.inf
+    data[2, 2] = 1
+    assert tf._array_density(data, float_type=False) == 0
+    data[2, 1] = data[1, 2] = data[1, 1] = 1
+    assert np.allclose(tf._array_density(data, float_type=False), 3./8.)
+
+def test_float_array_density():
+    data = np.ones((4, 4), dtype='float32')
+    assert tf._array_density(data, float_type=True) == 1.0
+    data = np.full((4, 4), np.nan, dtype='float32')
+    assert tf._array_density(data, float_type=True) == np.inf
+    data[2, 2] = 1
+    assert tf._array_density(data, float_type=True) == 0
+    data[2, 1] = data[1, 2] = data[1, 1] = 1
+    assert np.allclose(tf._array_density(data, float_type=True), 3./8.)
 
 
-def test_dynspread():
+def test_rgb_dynspread():
     b = 0xffff0000
     data = np.array([[b, b, 0, 0, 0],
                      [b, b, 0, 0, 0],
@@ -437,6 +940,52 @@ def test_dynspread():
 
     pytest.raises(ValueError, lambda: tf.dynspread(img, threshold=1.1))
     pytest.raises(ValueError, lambda: tf.dynspread(img, max_px=-1))
+
+def test_array_dynspread():
+    data = np.array([[1, 1, 0, 0, 0],
+                     [1, 1, 0, 0, 0],
+                     [0, 0, 0, 0, 0],
+                     [0, 0, 0, 1, 0],
+                     [0, 0, 0, 0, 0]], dtype='uint32')
+    coords = [np.arange(5), np.arange(5)]
+    arr = xr.DataArray(data, coords=coords, dims=dims)
+    assert tf.dynspread(arr).equals(tf.spread(arr, 1))
+    assert tf.dynspread(arr, threshold=0.9).equals(tf.spread(arr, 2))
+    assert tf.dynspread(arr, threshold=0).equals(arr)
+    assert tf.dynspread(arr, max_px=0).equals(arr)
+
+    pytest.raises(ValueError, lambda: tf.dynspread(arr, threshold=1.1))
+    pytest.raises(ValueError, lambda: tf.dynspread(arr, max_px=-1))
+
+
+def test_categorical_dynspread():
+    a_data = np.array([[0, 1, 0, 0, 0],
+                       [0, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 0]], dtype='int32')
+
+    b_data = np.array([[0, 0, 0, 0, 0],
+                       [0, 1, 0, 0, 0],
+                       [0, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 0]], dtype='int32')
+
+    c_data = np.array([[1, 0, 0, 0, 0],
+                       [1, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 0],
+                       [0, 0, 0, 1, 0],
+                       [0, 0, 0, 0, 0]], dtype='int32')
+
+    data = np.dstack([a_data, b_data, c_data])
+    coords = [np.arange(5), np.arange(5)]
+    arr = xr.DataArray(data, coords=coords + [['a', 'b', 'c']],
+                       dims=dims + ['cat'])
+    assert tf.dynspread(arr).equals(tf.spread(arr, 1))
+    assert tf.dynspread(arr, threshold=0.9).equals(tf.spread(arr, 2))
+    assert tf.dynspread(arr, threshold=0).equals(arr)
+    assert tf.dynspread(arr, max_px=0).equals(arr)
+
 
 
 def check_eq_hist_cdf_slope(eq):
@@ -481,6 +1030,6 @@ def test_shade_should_handle_zeros_array():
                      [0, 0, 0, 0, 0],
                      [0, 0, 0, 0, 0],
                      [0, 0, 0, 0, 0]], dtype='uint32')
-    arr = xr.DataArray(data, dims=['x', 'y'])
+    arr = tf.Image(data, dims=['x', 'y'])
     img = tf.shade(arr, cmap=['white', 'black'], how='linear')
     assert img is not None

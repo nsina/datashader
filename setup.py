@@ -15,76 +15,56 @@ install_requires = [
     'dask[complete] >=0.18.0',
     'toolz >=0.7.4',  # ? for some dask issue (dasks does only >=0.7.3)
     'datashape >=0.5.1',
-    'numba >=0.37.0',
+    'numba >=0.37.0,!=0.49.*,!=0.50.*',
     'numpy >=1.7',
-    'pandas >=0.20.3',
+    'pandas >=0.24.1',
     'pillow >=3.1.1',
     'xarray >=0.9.6',
     'colorcet >=0.9.0',
     'param >=1.6.0',
     'pyct[cmd]',
-    'scikit-image',
     'bokeh',
     'scipy',
 ]
 
+examples = [
+    'distributed', # dask
+    'holoviews >=1.10.0',
+    'scikit-image',
+    'matplotlib',
+]
+
 extras_require = {
     'tests': [
-        'pytest >=3.9.3',
+        'pytest >=3.9.3,<6.0',
         'pytest-benchmark >=3.0.0',
+        'pytest-cov',
+        'codecov',
         'flake8',
-        'nbsmoke >=0.2.6',
+        'nbsmoke[all] >=0.4.0',
         'fastparquet >=0.1.6',  # optional dependency
-        'pandas >=0.24.1',  # optional ragged array support
-    ],
-    'examples': [],
-    'examples_extra':[
-        'attrs',
-        'beautifulsoup4',
-        'bokeh',
-        #'cachey', # TODO: investigate (no conda package
-        'colorcet',
-        'dill',
-        'distributed', # dask
-        'fastparquet >=0.2.1',
         'holoviews >=1.10.0',
-        'hvplot >=0.4.0',
-        'intake >=0.4.1',
-        'intake-parquet',
-        'jupyter',
-        'jupyter_dashboards',
-        'matplotlib',
+        'pyarrow'
+    ],
+    'examples': examples,
+    'examples_extra': examples + [
         'networkx >=2.0',
-        'pandas >=0.24.1',
-        'panel >=0.4.0',
-        'paramnb',
-        'requests',
-        'tblib',
-        'xarray',
-        'pyyaml <5.1',
         'streamz >=0.2.0',
-        'webargs',
         ### conda only below here
-        'cartopy',
         'graphviz',
         'python-graphviz',
         'fastparquet',
-        'geoviews',
-        'iris',
-        'krb5',
-        'pyproj',
-        'pytables',
         'python-snappy',
         'rasterio',
         'snappy',
-        'shapely',
         'statsmodels'
     ]
 }
 
 extras_require['doc'] = extras_require['examples_extra'] + [
     'nbsite >=0.5.2',
-    'sphinx_ioam_theme',
+    'sphinx_holoviz_theme',
+    'tornado',
     'numpydoc'
 ]
 

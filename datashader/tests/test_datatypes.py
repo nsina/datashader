@@ -555,6 +555,15 @@ def data_repeated(data):
     return gen
 
 
+@pytest.fixture(params=[None, lambda x: x])
+def sort_by_key(request):
+    """
+    Simple fixture for testing keys in sorting methods.
+    Tests None (no key) and the identity key.
+    """
+    return request.param
+
+
 @pytest.fixture
 def data_missing():
     """Length-2 array with [NA, Valid]"""
@@ -611,7 +620,14 @@ def na_value():
 
 # Subclass BaseDtypeTests to run pandas-provided extension array test suite
 class TestRaggedConstructors(eb.BaseConstructorsTests):
-    pass
+
+    @pytest.mark.skip(reason="Constructing DataFrame from RaggedArray not supported")
+    def test_from_dtype(self, data):
+        pass
+
+    @pytest.mark.skip(reason="passing scalar with index not supported")
+    def test_series_constructor_scalar_with_index(self, data, dtype):
+        pass
 
 
 class TestRaggedDtype(eb.BaseDtypeTests):
@@ -674,6 +690,18 @@ class TestRaggedGetitem(eb.BaseGetitemTests):
         with pytest.raises(IndexError, match="out of bounds"):
             data.take([len(data) + 1])
 
+    def test_item(self, data):
+        # https://github.com/pandas-dev/pandas/pull/30175
+        s = pd.Series(data)
+        result = s[:1].item()
+        np.testing.assert_array_equal(result, data[0])
+
+        msg = "can only convert an array of size 1 to a Python scalar"
+        with pytest.raises(ValueError, match=msg):
+            s[:0].item()
+
+        with pytest.raises(ValueError, match=msg):
+            s.item()
 
 class TestRaggedGroupby(eb.BaseGroupbyTests):
     @pytest.mark.parametrize('op', [
@@ -717,11 +745,24 @@ class TestRaggedInterface(eb.BaseInterfaceTests):
     def test_copy(self):
         pass
 
+    @pytest.mark.skip(reason="__setitem__ not supported")
+    def test_view(self):
+        pass
+
+
 class TestRaggedMethods(eb.BaseMethodsTests):
 
     # # AttributeError: 'RaggedArray' object has no attribute 'value_counts'
     @pytest.mark.skip(reason="value_counts not supported")
     def test_value_counts(self):
+        pass
+
+    @pytest.mark.skip(reason="value_counts not supported")
+    def test_value_counts_with_normalize(self):
+        pass
+
+    @pytest.mark.skip(reason="shift not supported")
+    def test_shift_0_periods(self):
         pass
 
     # Add array equality
@@ -761,6 +802,12 @@ class TestRaggedMethods(eb.BaseMethodsTests):
     def test_combine_first(self):
         pass
 
+    @pytest.mark.skip(
+        reason="Searchsorted seems not implemented for custom extension arrays"
+    )
+    def test_searchsorted(self):
+        pass
+
 
 class TestRaggedPrinting(eb.BasePrintingTests):
     pass
@@ -782,4 +829,8 @@ class TestRaggedMissing(eb.BaseMissingTests):
 class TestRaggedReshaping(eb.BaseReshapingTests):
     @pytest.mark.skip(reason="__setitem__ not supported")
     def test_ravel(self):
+        pass
+
+    @pytest.mark.skip(reason="transpose with numpy array elements seems not supported")
+    def test_transpose(self):
         pass

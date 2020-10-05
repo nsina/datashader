@@ -8,7 +8,9 @@ import numba as nb
 import numpy as np
 import pandas as pd
 
+from toolz import memoize
 from xarray import DataArray
+
 import dask.dataframe as dd
 import datashape
 
@@ -17,7 +19,28 @@ try:
 except ImportError:
     RaggedDtype = type(None)
 
+try:
+    import cudf
+except Exception:
+    cudf = None
+
+try:
+    from spatialpandas.geometry import GeometryDtype
+except ImportError:
+    GeometryDtype = type(None)
+
+
+class VisibleDeprecationWarning(UserWarning):
+    """Visible deprecation warning.
+
+    By default, python will not show deprecation warnings, so this class
+    can be used when a very visible warning is helpful, for example because
+    the usage is most likely a user bug.
+    """
+
+
 ngjit = nb.jit(nopython=True, nogil=True)
+ngjit_parallel = nb.jit(nopython=True, nogil=True, parallel=True)
 
 
 class Expr(object):
@@ -84,6 +107,24 @@ class Dispatcher(object):
         raise TypeError("No dispatch for {0} type".format(typ))
 
 
+def isrealfloat(dt):
+    """Check if a datashape is numeric and real.
+
+    Example
+    -------
+    >>> isrealfloat('int32')
+    False
+    >>> isrealfloat('float64')
+    True
+    >>> isrealfloat('string')
+    False
+    >>> isrealfloat('complex64')
+    False
+    """
+    dt = datashape.predicates.launder(dt)
+    return isinstance(dt, datashape.Unit) and dt in datashape.typesets.floating
+
+
 def isreal(dt):
     """Check if a datashape is numeric and real.
 
@@ -100,6 +141,29 @@ def isreal(dt):
     """
     dt = datashape.predicates.launder(dt)
     return isinstance(dt, datashape.Unit) and dt in datashape.typesets.real
+
+
+def nansum_missing(array, axis):
+    """nansum where all-NaN values remain NaNs.
+
+    Note: In NumPy <=1.9 NaN is returned for slices that are
+    all NaN, while later versions return 0. This function emulates
+    the older behavior, which allows using NaN as a missing value
+    indicator.
+
+    Parameters
+    ----------
+    array: Array to sum over
+    axis:  Axis to sum over
+    """
+    T = list(range(array.ndim))
+    T.remove(axis)
+    T.insert(0, axis)
+    array = array.transpose(T)
+    missing_vals = np.isnan(array)
+    all_empty = np.all(missing_vals, axis=0)
+    set_to_zero = missing_vals & ~all_empty
+    return np.where(set_to_zero, 0, array).sum(axis=0)
 
 
 def calc_res(raster):
@@ -205,12 +269,14 @@ def orient_array(raster, res=None, layer=None):
         res = calc_res(raster)
     array = raster.data
     if layer is not None: array = array[layer-1]
+    r0zero = np.timedelta64(0, 'ns') if isinstance(res[0], np.timedelta64) else 0
+    r1zero = np.timedelta64(0, 'ns') if isinstance(res[1], np.timedelta64) else 0
     if array.ndim == 2:
-        if res[0] < 0: array = array[:, ::-1]
-        if res[1] > 0: array = array[::-1]
+        if res[0] < r0zero: array = array[:, ::-1]
+        if res[1] > r1zero: array = array[::-1]
     else:
-        if res[0] < 0: array = array[:, :, ::-1]
-        if res[1] > 0: array = array[:, ::-1]
+        if res[0] < r0zero: array = array[:, :, ::-1]
+        if res[1] > r1zero: array = array[:, ::-1]
     return array
 
 
@@ -337,7 +403,7 @@ def lnglat_to_meters(longitude, latitude):
     or tuples will be converted to Numpy arrays.
 
     Examples:
-       easting, northing = lnglat_to_meters(-40.71,74)
+       easting, northing = lnglat_to_meters(-74,40.71)
 
        easting, northing = lnglat_to_meters(np.array([-74]),np.array([40.71]))
 
@@ -360,12 +426,26 @@ def dshape_from_pandas_helper(col):
     """Return an object from datashape.coretypes given a column from a pandas
     dataframe.
     """
-    if isinstance(col.dtype, type(pd.Categorical.dtype)) or isinstance(col.dtype, pd.api.types.CategoricalDtype):
+    if (isinstance(col.dtype, type(pd.Categorical.dtype)) or
+            isinstance(col.dtype, pd.api.types.CategoricalDtype) or
+            cudf and isinstance(col.dtype, cudf.core.dtypes.CategoricalDtype)):
+        # Compute category dtype
+        pd_categories = col.cat.categories
+        if isinstance(pd_categories, dd.Index):
+            pd_categories = pd_categories.compute()
+        if cudf and isinstance(pd_categories, cudf.Index):
+            pd_categories = pd_categories.to_pandas()
+
+        categories = np.array(pd_categories)
+
+        if categories.dtype.kind == 'U':
+            categories = categories.astype('object')
+
         cat_dshape = datashape.dshape('{} * {}'.format(
             len(col.cat.categories),
-            col.cat.categories.dtype,
+            categories.dtype,
         ))
-        return datashape.Categorical(col.cat.categories.values,
+        return datashape.Categorical(categories,
                                      type=cat_dshape,
                                      ordered=col.cat.ordered)
     elif col.dtype.kind == 'M':
@@ -374,7 +454,7 @@ def dshape_from_pandas_helper(col):
             # Pandas stores this as a pytz.tzinfo, but DataShape wants a string
             tz = str(tz)
         return datashape.Option(datashape.DateTime(tz=tz))
-    elif isinstance(col.dtype, RaggedDtype):
+    elif isinstance(col.dtype, (RaggedDtype, GeometryDtype)):
         return col.dtype
     dshape = datashape.CType.from_numpy_dtype(col.dtype)
     dshape = datashape.string if dshape == datashape.object_ else dshape
@@ -389,9 +469,20 @@ def dshape_from_pandas(df):
                                        for k in df.columns])
 
 
+@memoize(key=lambda args, kwargs: tuple(args[0].__dask_keys__()))
 def dshape_from_dask(df):
     """Return a datashape.DataShape object given a dask dataframe."""
-    return datashape.var * dshape_from_pandas(df.head()).measure
+    cat_columns = [
+        col for col in df.columns
+        if (isinstance(df[col].dtype, type(pd.Categorical.dtype)) or
+            isinstance(df[col].dtype, pd.api.types.CategoricalDtype))
+           and not getattr(df[col].cat, 'known', True)]
+    df = df.categorize(cat_columns, index=False)
+    # get_partition(0) used below because categories are sometimes repeated
+    # for dask-cudf DataFrames with multiple partitions
+    return datashape.var * datashape.Record([
+        (k, dshape_from_pandas_helper(df[k].get_partition(0))) for k in df.columns
+    ])
 
 
 def dshape_from_xarray_dataset(xr_ds):
